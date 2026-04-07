@@ -9,34 +9,54 @@ HEADERS = {"User-Agent": "GE-Volume-Test"}
 
 @st.cache_data(ttl=60)
 def fetch_volume_data():
-    volume_data = requests.get(VOLUME_URL, headers=HEADERS, timeout=10).json()["data"]
-    mapping = requests.get(MAPPING_URL, headers=HEADERS, timeout=10).json()
+    vol_response = requests.get(VOLUME_URL, headers=HEADERS, timeout=10)
+    map_response = requests.get(MAPPING_URL, headers=HEADERS, timeout=10)
 
-    id_to_name = {item["id"]: item["name"] for item in mapping}
+    # 🔍 Debug raw responses
+    st.write("Status codes:", vol_response.status_code, map_response.status_code)
+
+    try:
+        volume_json = vol_response.json()
+        mapping_json = map_response.json()
+    except Exception as e:
+        st.error(f"JSON decode failed: {e}")
+        return pd.DataFrame()
+
+    st.write("Volume JSON sample:", list(volume_json.keys()))
+
+    volume_data = volume_json.get("data", {})
+    if not volume_data:
+        st.error("No 'data' field in volume response")
+        st.write(volume_json)
+        return pd.DataFrame()
+
+    id_to_name = {item["id"]: item["name"] for item in mapping_json}
 
     rows = []
     for item_id, data in volume_data.items():
         item_id = int(item_id)
         volume = data.get("volume", 0)
 
-        if volume > 0:
-            rows.append({
-                "Item": id_to_name.get(item_id, "Unknown"),
-                "Volume": volume
-            })
+        rows.append({
+            "Item": id_to_name.get(item_id, "Unknown"),
+            "Volume": volume
+        })
 
     df = pd.DataFrame(rows)
-    df = df.sort_values(by="Volume", ascending=False)
 
+    # ✅ Prevent crash if empty
+    if df.empty or "Volume" not in df.columns:
+        st.error("DataFrame is empty or malformed")
+        st.write(df)
+        return df
+
+    df = df.sort_values(by="Volume", ascending=False)
     return df.head(10)
 
 
-st.set_page_config(page_title="OSRS Volume Test")
-st.title("📦 Top 10 Most Traded Items (24h)")
+st.title("📦 Volume Debug")
 
 top_items = fetch_volume_data()
 
-if top_items.empty:
-    st.write("No data returned — API may not be working.")
-else:
+if not top_items.empty:
     st.dataframe(top_items)
