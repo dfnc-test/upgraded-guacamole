@@ -38,13 +38,9 @@ def fetch_data():
 def fetch_history(item_id):
     """Fetch historical midpoint prices for Z-score."""
     try:
-        url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?timestep=1d&id={item_id}"
+        # Use a valid timestep
+        url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?timestep=1h&id={item_id}"
         res = requests.get(url, headers=HEADERS, timeout=10).json()
-
-        # 🔹 Debug: show raw response for first few calls
-        st.write(f"History API raw for item {item_id}:")
-        st.json(res)
-
         data = res.get("data", {}).get(str(item_id), {})
 
         if not data:
@@ -57,7 +53,7 @@ def fetch_history(item_id):
             high = point.get("avgHighPrice", 0)
             low = point.get("avgLowPrice", 0)
             if high > 0 and low > 0:
-                prices.append((high + low) / 2)
+                prices.append((high + low)/2)
             elif high > 0:
                 prices.append(high)
             elif low > 0:
@@ -70,6 +66,7 @@ def fetch_history(item_id):
             st.write(f"No valid price points parsed for item {item_id}")
             return None
 
+        # Return Series with timestamps as datetime
         return pd.Series(prices, index=pd.to_datetime(timestamps, unit='s'))
     except Exception as e:
         st.write(f"Error fetching history for {item_id}: {e}")
