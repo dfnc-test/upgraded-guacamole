@@ -105,8 +105,13 @@ def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
 
         # ----- Z-SCORE using historical mid-prices -----
         hist = fetch_history(item_id)
-        if hist is not None and hist.std(ddof=0) != 0:
-            z = (mid_price - hist.mean()) / hist.std(ddof=0)
+        if hist is not None and len(hist) >= 7:  # ensure enough history
+            hist_mean = hist.mean()
+            hist_std = hist.std(ddof=0)
+            if hist_std > 0:
+                z = (mid_price - hist_mean) / hist_std
+            else:
+                z = 0  # flat price history
         else:
             z = np.nan  # not enough data
 
