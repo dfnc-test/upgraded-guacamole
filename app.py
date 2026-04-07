@@ -91,7 +91,7 @@ def high_volume_flips(prices, volumes, names, types):
             "Item": names.get(item_id,"Unknown"),
             "Buy": low,
             "Sell": high,
-            "Max Price": high,  # Could also track historical high if cached
+            "Max Price": high,
             "Margin": int(margin),
             "Volume": volume,
             "Type": types.get(item_id,"")
@@ -126,41 +126,40 @@ def speculative_trades(prices, volumes, names):
         })
     return pd.DataFrame(rows).sort_values(by="Confidence", ascending=False).head(20)
 
+# ---------- DISPLAY WITH ICONS ----------
+def render_table_with_icons(df):
+    df = df.copy()
+    df["Image"] = df["Image"].apply(lambda url: f'<img src="{url}" width="20" style="vertical-align:middle">')
+    # Put Image first
+    cols = df.columns.tolist()
+    cols.insert(0, cols.pop(cols.index("Image")))
+    df = df[cols]
+    html_table = df.to_html(escape=False, index=False)
+    st.markdown(html_table, unsafe_allow_html=True)
+
 # ---------- UI ----------
-st.set_page_config(page_title="OSRS GE Dashboard v5", layout="wide")
-st.title("📊 OSRS GE Dashboard v5")
+st.set_page_config(page_title="OSRS GE Dashboard with Icons", layout="wide")
+st.title("📊 OSRS GE Dashboard with Icons")
 
 prices, volumes, names, limits, types = fetch_data()
 
-# Helper function to render tables with images
-def display_table_with_images(df):
-    for _, row in df.iterrows():
-        cols = st.columns([0.5, 2])
-        with cols[0]:
-            st.image(row["Image"], width=40)
-        with cols[1]:
-            st.write({k: v for k,v in row.items() if k!="Image"})
-
-# Regular flips
 st.subheader("💰 Regular Profitable Trades")
 regular_df = calculate_flips(prices, volumes, names, limits)
 if regular_df.empty:
     st.write("No regular trades found.")
 else:
-    display_table_with_images(regular_df)
+    render_table_with_icons(regular_df)
 
-# High volume flips
 st.subheader("⚡ High Volume / Low Margin Flips")
 high_vol_df = high_volume_flips(prices, volumes, names, types)
 if high_vol_df.empty:
     st.write("No high-volume flips found.")
 else:
-    display_table_with_images(high_vol_df)
+    render_table_with_icons(high_vol_df)
 
-# Speculative trades
 st.subheader("🔮 Speculative / Underpriced Trades")
 spec_df = speculative_trades(prices, volumes, names)
 if spec_df.empty:
     st.write("No speculative trades found.")
 else:
-    display_table_with_images(spec_df)
+    render_table_with_icons(spec_df)
