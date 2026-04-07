@@ -92,7 +92,14 @@ st.info("Fetching latest GE data...")
 prices, names = fetch_prices()
 
 # Pick top 100 items by high price as candidates
-top_items = dict(sorted(prices.items(), key=lambda x: x[1].get("high",0), reverse=True)[:100])
+# Pick top 100 items by high price as candidates, skipping None
+top_items = dict(
+    sorted(
+        ((item_id, data) for item_id, data in prices.items() if data.get("high") is not None),
+        key=lambda x: x[1]["high"],
+        reverse=True
+    )[:100]
+)
 
 # Fetch historical data
 st.info("Fetching historical data (this may take a minute)...")
