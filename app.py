@@ -36,7 +36,7 @@ def fetch_data():
 
 @st.cache_data(ttl=3600)
 def fetch_history(item_id):
-    """Fetch historical midpoint prices for Z-score."""
+    """Fetch historical midpoint prices for Z-score, handling both dict and list responses."""
     try:
         url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?timestep=1h&id={item_id}"
         res = requests.get(url, headers=HEADERS, timeout=10).json()
@@ -49,7 +49,7 @@ def fetch_history(item_id):
         prices = []
         timestamps = []
 
-        # If data is a dict (timestamps as keys)
+        # If data is a dictionary with timestamps as keys
         if isinstance(data, dict):
             for timestamp, point in data.items():
                 high = point.get("avgHighPrice", 0)
@@ -60,10 +60,9 @@ def fetch_history(item_id):
                     prices.append(high)
                 elif low > 0:
                     prices.append(low)
-                else:
-                    continue
-                timestamps.append(timestamp)
-        # If data is a list (each point has 'timestamp')
+                timestamps.append(int(timestamp))  # timestamp keys are strings
+
+        # If data is a list of points
         elif isinstance(data, list):
             for point in data:
                 timestamp = point.get("timestamp")
@@ -75,9 +74,9 @@ def fetch_history(item_id):
                     prices.append(high)
                 elif low > 0:
                     prices.append(low)
-                else:
-                    continue
-                timestamps.append(timestamp)
+                if timestamp is not None:
+                    timestamps.append(timestamp)
+
         else:
             st.write(f"Unexpected data format for item {item_id}")
             return None
@@ -89,6 +88,7 @@ def fetch_history(item_id):
         # Convert timestamps to datetime
         timestamps_dt = pd.to_datetime(timestamps, unit='s', errors='coerce')
         return pd.Series(prices, index=timestamps_dt)
+
     except Exception as e:
         st.write(f"Error fetching history for {item_id}: {e}")
         return None
