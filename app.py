@@ -42,18 +42,19 @@ def load_watchlist():
     return []
 
 # ---------- CALCULATIONS ----------
-def calculate_flips(prices, volumes, names, limits):
+def calculate_trades(prices, volumes, names, limits, table_type):
     rows = []
     for item_id, data in prices.items():
         item_id = int(item_id)
         high, low = data.get("high"), data.get("low")
         if not high or not low or low <= 0: continue
+
         vol_data = volumes.get(str(item_id), {})
         volume = vol_data.get("highPriceVolume",0) + vol_data.get("lowPriceVolume",0)
         if volume < MIN_VOLUME: continue
+
         real_sell = high * (1 - GE_TAX)
         real_margin = real_sell - low
-        if real_margin < MIN_MARGIN: continue
         roi = real_margin / low
         buy_limit = limits.get(item_id, 0)
         profit_per_limit = real_margin * buy_limit
@@ -64,6 +65,15 @@ def calculate_flips(prices, volumes, names, limits):
         margin_score = min(real_margin / 1000, 1)
         roi_score = min(roi / 0.1, 1)
         confidence_score = round((volume_score + margin_score + roi_score)/3*100,1)
+
+        # Apply table-specific filters
+        if table_type=="regular":
+            if real_margin < 50 or roi < 0.005: continue
+        elif table_type=="highvolume":
+            if volume < 2000 or real_margin < 10: continue
+        elif table_type=="speculative":
+            if confidence_score < 50: continue
+
         rows.append({
             "Image": get_image_url(names.get(item_id,"Unknown")),
             "Item": names.get(item_id,"Unknown"),
@@ -77,57 +87,52 @@ def calculate_flips(prices, volumes, names, limits):
             "Profit per Hour": int(profit_per_hour),
             "Confidence": confidence_score
         })
-    return pd.DataFrame(rows).sort_values(by="Profit per Hour", ascending=False).head(20)
+    return pd.DataFrame(rows)
 
-# ---------- UI TABLE WITH ADD BUTTONS ----------
-def render_table_with_add(df, table_key):
+# ---------- TABLE RENDERING ----------
+def render_table(df, table_key):
     if df.empty: 
         st.write("No trades found.")
         return
 
-    # Table headers
+    # Headers
     headers = ["", "Item", "Buy", "Sell", "Margin", "ROI %", "Volume", "Buy Limit", "Profit/Limit", "Profit/Hr", "Conf", "Add"]
-
     st.markdown(
-        f"""
+        """
         <style>
-        .tight td {{padding:2px 5px;}}
-        .tight th {{padding:2px 5px;}}
+        .tight td, .tight th {padding:2px 4px; font-size:12px;}
         </style>
         """, unsafe_allow_html=True)
+    st.markdown("<div style='display:flex; font-weight:bold; border-bottom:1px solid #aaa;'>"
+                + "".join([f"<div style='flex:{1 if i>0 else 0.1}'>{h}</div>" for i,h in enumerate(headers)])
+                + "</div>", unsafe_allow_html=True)
 
-    # Iterate rows
+    # Rows
     for idx, row in df.iterrows():
-        # Columns layout
         cols = st.columns([0.1,2,1,1,1,1,1,1,1,1,0.5,0.3])
-        # Image
-        with cols[0]: st.markdown(f'<img src="{row["Image"]}" width="20" style="vertical-align:middle">', unsafe_allow_html=True)
-        # Item
+        with cols[0]: st.markdown(f'<img src="{row["Image"]}" width="20">', unsafe_allow_html=True)
         with cols[1]: st.write(row["Item"])
-        # Buy green
         with cols[2]: st.markdown(f'<span style="color:green">{row["Buy"]}</span>', unsafe_allow_html=True)
-        # Sell red
         with cols[3]: st.markdown(f'<span style="color:red">{row["Sell"]}</span>', unsafe_allow_html=True)
-        # Margin gradient
-        margin_color = "red" if row["Margin"]<0 else f"rgb(0,{min(row['Margin'],200)},0)"
+        # margin gradient subtle
+        margin_color = f"rgb({max(0,150-abs(row['Margin']))},{min(150,row['Margin'])},0)"
         with cols[4]: st.markdown(f'<span style="color:{margin_color}">{row["Margin"]}</span>', unsafe_allow_html=True)
-        # ROI, Volume, Buy Limit, Profit per limit, Profit per hour, Confidence
-        with cols[5]: st.write(row["ROI %"])
-        with cols[6]: st.write(row["Volume"])
-        with cols[7]: st.write(row["Buy Limit"])
-        with cols[8]: st.write(row["Profit per Limit"])
-        with cols[9]: st.write(row["Profit per Hour"])
-        with cols[10]: st.write(row["Confidence"])
-        # Add button
+        for i,col_name in enumerate(["ROI %","Volume","Buy Limit","Profit per Limit","Profit per Hour","Confidence"]):
+            with cols[5+i]: st.markdown(f'<span style="color:#555">{row[col_name]}</span>', unsafe_allow_html=True)
         with cols[11]:
             if st.button("➕", key=f"{table_key}_{idx}"):
                 if "watchlist" not in st.session_state: st.session_state.watchlist = load_watchlist()
                 if row["Item"] not in [w["Item"] for w in st.session_state.watchlist]:
-                    st.session_state.watchlist.append(row.to_dict())
+                    st.session_state.watchlist.append({
+                        "Item": row["Item"],
+                        "Image": row["Image"],
+                        "Buy": row["Buy"],
+                        "Sell": row["Sell"],
+                        "Volume": row["Volume"]
+                    })
                     save_watchlist(st.session_state.watchlist)
-                st.session_state.table_updated = True  # trigger rerun via session_state
 
-# ---------- WATCHLIST ----------
+# ---------- WATCHLIST RENDERING ----------
 def render_watchlist():
     st.sidebar.header("👁️ Watchlist")
     watchlist = st.session_state.get("watchlist", load_watchlist())
@@ -135,23 +140,13 @@ def render_watchlist():
         st.sidebar.write("No trades added yet.")
         return
     for idx, row in enumerate(watchlist):
-        cols = st.sidebar.columns([0.1,2,1,1,1,1,1,1,1,1,0.5])
-        with cols[0]: st.sidebar.markdown(f'<img src="{row["Image"]}" width="20">', unsafe_allow_html=True)
-        with cols[1]: st.sidebar.write(row["Item"])
-        with cols[2]: st.sidebar.markdown(f'<span style="color:green">{row["Buy"]}</span>', unsafe_allow_html=True)
-        with cols[3]: st.sidebar.markdown(f'<span style="color:red">{row["Sell"]}</span>', unsafe_allow_html=True)
-        margin_color = "red" if row["Margin"]<0 else f"rgb(0,{min(row['Margin'],200)},0)"
-        with cols[4]: st.sidebar.markdown(f'<span style="color:{margin_color}">{row["Margin"]}</span>', unsafe_allow_html=True)
-        with cols[5]: st.sidebar.write(row["ROI %"])
-        with cols[6]: st.sidebar.write(row["Volume"])
-        with cols[7]: st.sidebar.write(row["Buy Limit"])
-        with cols[8]: st.sidebar.write(row["Profit per Limit"])
-        with cols[9]: st.sidebar.write(row["Profit per Hour"])
-        with cols[10]:
-            if st.sidebar.button("❌", key=f"remove_{idx}"):
-                st.session_state.watchlist.pop(idx)
-                save_watchlist(st.session_state.watchlist)
-                st.session_state.table_updated = True
+        st.sidebar.markdown("<div style='display:flex; align-items:center; padding:5px; border:1px solid #ccc; margin-bottom:4px; border-radius:5px;'>"
+                            f"<img src='{row['Image']}' width='30' style='margin-right:8px;'>"
+                            f"<div style='flex:1'>{row['Item']}</div>"
+                            f"<div style='color:green; margin-right:5px'>{row['Buy']}</div>"
+                            f"<div style='color:red; margin-right:5px'>{row['Sell']}</div>"
+                            f"<div style='color:#555'>{row['Volume']}</div>"
+                            "</div>", unsafe_allow_html=True)
 
 # ---------- MAIN ----------
 st.set_page_config(page_title="OSRS GE Dashboard", layout="wide")
@@ -159,23 +154,17 @@ st.title("📊 OSRS GE Dashboard")
 
 prices, volumes, names, limits = fetch_data()
 if "watchlist" not in st.session_state: st.session_state.watchlist = load_watchlist()
-if "table_updated" not in st.session_state: st.session_state.table_updated = False
 
 st.subheader("💰 Regular Profitable Trades")
-regular_df = calculate_flips(prices, volumes, names, limits)
-render_table_with_add(regular_df, "regular")
+regular_df = calculate_trades(prices, volumes, names, limits, "regular")
+render_table(regular_df, "regular")
 
 st.subheader("🟢 High Volume Flips")
-high_vol_df = regular_df.sort_values("Volume", ascending=False).head(20)
-render_table_with_add(high_vol_df, "highvol")
+highvol_df = calculate_trades(prices, volumes, names, limits, "highvolume")
+render_table(highvol_df, "highvol")
 
 st.subheader("🔵 Speculative Trades")
-speculative_df = regular_df.sort_values("Confidence", ascending=False).head(20)
-render_table_with_add(speculative_df, "speculative")
+speculative_df = calculate_trades(prices, volumes, names, limits, "speculative")
+render_table(speculative_df, "speculative")
 
 render_watchlist()
-
-# Rerun logic
-if st.session_state.table_updated:
-    st.session_state.table_updated = False
-    st.experimental_rerun()
