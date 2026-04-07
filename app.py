@@ -7,13 +7,11 @@ LATEST_URL = "https://prices.runescape.wiki/api/v1/osrs/latest"
 VOLUME_URL = "https://prices.runescape.wiki/api/v1/osrs/24h"
 MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping"
 
-HEADERS = {
-    "User-Agent": "osrs-ge-dashboard (youremail@gmail.com)"
-}
+HEADERS = {"User-Agent": "osrs-ge-dashboard (youremail@gmail.com)"}
 
 MIN_VOLUME = 1000
 MIN_MARGIN = 20
-GE_TAX = 0.05  # 5% Grand Exchange tax
+GE_TAX = 0.05  # 5% GE tax
 BUY_LIMIT_HOURS = 4  # Time window for buy limit calculations
 
 # ---------- FETCH ----------
@@ -28,11 +26,12 @@ def fetch_data():
     mapping = mapping_res.json()
 
     id_to_name = {item["id"]: item["name"] for item in mapping}
+    id_to_limit = {item["id"]: item.get("limit", 0) for item in mapping}
 
-    return prices, volumes, id_to_name
+    return prices, volumes, id_to_name, id_to_limit
 
 # ---------- ANALYZE ----------
-def analyze_items(prices, volumes, names):
+def analyze_items(prices, volumes, names, limits):
     rows = []
 
     for item_id, data in prices.items():
@@ -40,21 +39,16 @@ def analyze_items(prices, volumes, names):
 
         high = data.get("high")
         low = data.get("low")
-        buy_limit = data.get("limit", 0)  # daily buy limit
 
         if not high or not low or low <= 0:
             continue
 
         vol_data = volumes.get(str(item_id), {})
-        volume = (
-            vol_data.get("highPriceVolume", 0) +
-            vol_data.get("lowPriceVolume", 0)
-        )
+        volume = vol_data.get("highPriceVolume", 0) + vol_data.get("lowPriceVolume", 0)
 
         if volume < MIN_VOLUME:
             continue
 
-        # Apply GE tax
         real_sell = high * (1 - GE_TAX)
         real_margin = real_sell - low
 
@@ -63,7 +57,9 @@ def analyze_items(prices, volumes, names):
 
         roi = real_margin / low
 
-        # Profit per buy limit (assume buy limit resets every 4 hours)
+        buy_limit = limits.get(item_id, 0)
+
+        # Profit per buy limit
         profit_per_limit = real_margin * buy_limit
 
         # Estimate time to sell based on 24h volume
@@ -71,6 +67,12 @@ def analyze_items(prices, volumes, names):
         time_to_sell_hours = min(buy_limit / fills_per_hour, BUY_LIMIT_HOURS) if fills_per_hour > 0 else 0.1
 
         profit_per_hour = profit_per_limit / max(time_to_sell_hours, 0.1)
+
+        # Confidence score: normalize volume, margin, ROI
+        volume_score = min(volume / 100_000, 1)  # cap at 1
+        margin_score = min(real_margin / 1000, 1)  # cap at 1
+        roi_score = min(roi / 0.1, 1)  # cap at 1 for 10% ROI
+        confidence_score = round((volume_score + margin_score + roi_score) / 3 * 100, 1)
 
         rows.append({
             "Item": names.get(item_id, "Unknown"),
@@ -81,7 +83,8 @@ def analyze_items(prices, volumes, names):
             "Volume": volume,
             "Buy Limit": buy_limit,
             "Profit per Limit": int(profit_per_limit),
-            "Profit per Hour": int(profit_per_hour)
+            "Profit per Hour": int(profit_per_hour),
+            "Confidence": confidence_score
         })
 
     df = pd.DataFrame(rows)
@@ -89,16 +92,16 @@ def analyze_items(prices, volumes, names):
     if df.empty:
         return df
 
-    # Rank by most profitable per hour
+    # Sort by profit per hour as main ranking
     df = df.sort_values(by="Profit per Hour", ascending=False)
     return df.head(20)
 
 # ---------- UI ----------
 st.set_page_config(page_title="OSRS GE Dashboard", layout="centered")
-st.title("📊 OSRS GE Trading Dashboard with Profit/Hour")
+st.title("📊 OSRS GE Dashboard with Profit/Hour & Confidence")
 
-prices, volumes, names = fetch_data()
-df = analyze_items(prices, volumes, names)
+prices, volumes, names, limits = fetch_data()
+df = analyze_items(prices, volumes, names, limits)
 
 if df.empty:
     st.warning("No trades found — try lowering filters or increasing min volume")
