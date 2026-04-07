@@ -39,10 +39,10 @@ def fetch_history(item_id):
     try:
         url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?timestep=1d&id={item_id}"
         res = requests.get(url, headers=HEADERS, timeout=10).json()
-        data = res.get("data", {}).get(str(item_id), [])
+        data = res.get("data", {}).get(str(item_id), {})
 
         prices = []
-        for point in data:
+        for timestamp, point in data.items():  # keys are timestamps
             high = point.get("avgHighPrice", 0)
             low = point.get("avgLowPrice", 0)
             if high > 0 and low > 0:
@@ -52,7 +52,7 @@ def fetch_history(item_id):
             elif low > 0:
                 prices.append(low)
 
-        if len(prices) < 7:
+        if len(prices) < 3:  # need at least 3 points
             return None
         return pd.Series(prices)
     except:
