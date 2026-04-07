@@ -36,7 +36,7 @@ def fetch_data():
 
 @st.cache_data(ttl=3600)
 def fetch_history(item_id):
-    """Fetch historical midpoint prices for Z-score, handling both dict and list responses."""
+    """Fetch historical midpoint prices for Z-score."""
     try:
         url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?timestep=1h&id={item_id}"
         res = requests.get(url, headers=HEADERS, timeout=10).json()
@@ -49,21 +49,7 @@ def fetch_history(item_id):
         prices = []
         timestamps = []
 
-        # If data is a dictionary with timestamps as keys
-        if isinstance(data, dict):
-            for timestamp, point in data.items():
-                high = point.get("avgHighPrice", 0)
-                low = point.get("avgLowPrice", 0)
-                if high > 0 and low > 0:
-                    prices.append((high + low) / 2)
-                elif high > 0:
-                    prices.append(high)
-                elif low > 0:
-                    prices.append(low)
-                timestamps.append(int(timestamp))  # timestamp keys are strings
-
-        # If data is a list of points
-        elif isinstance(data, list):
+        if isinstance(data, list):
             for point in data:
                 timestamp = point.get("timestamp")
                 high = point.get("avgHighPrice", 0)
@@ -74,20 +60,21 @@ def fetch_history(item_id):
                     prices.append(high)
                 elif low > 0:
                     prices.append(low)
-                if timestamp is not None:
+                if timestamp:
                     timestamps.append(timestamp)
 
         else:
-            st.write(f"Unexpected data format for item {item_id}")
+            st.write(f"Unexpected data format for item {item_id}: {type(data)}")
             return None
 
         if not prices:
             st.write(f"No valid price points parsed for item {item_id}")
             return None
 
-        # Convert timestamps to datetime
         timestamps_dt = pd.to_datetime(timestamps, unit='s', errors='coerce')
-        return pd.Series(prices, index=timestamps_dt)
+        series = pd.Series(prices, index=timestamps_dt)
+        st.write(f"Fetched {len(series)} historical points for item {item_id}")
+        return series
 
     except Exception as e:
         st.write(f"Error fetching history for {item_id}: {e}")
@@ -108,33 +95,21 @@ def load_watchlist():
 
 # ---------- DEBUG: Random Item Historical Table ----------
 st.subheader("🛠️ Debug Z-Score for Random Item")
+random_item_id = random.choice(list(prices.keys()))
+random_item_data = prices[random_item_id]
+high, low = random_item_data.get("high"), random_item_data.get("low")
+mid_price = (high + low)/2 if high and low else None
 
-prices, volumes, names, limits = fetch_data()
-
-hist_debug_shown = False
-attempts = 0
-while not hist_debug_shown and attempts < 10:
-    random_item_id = random.choice(list(prices.keys()))
-    random_item_data = prices[random_item_id]
-    high, low = random_item_data.get("high"), random_item_data.get("low")
-    mid_price = (high + low) / 2 if high and low else None
-
-    if mid_price:
-        hist = fetch_history(int(random_item_id))
-        if hist is not None:
-            hist_mean = hist.mean()
-            hist_std = hist.std(ddof=0)
-            z = (mid_price - hist_mean) / hist_std if hist_std > 0 else 0.0
-
-            debug_df = pd.DataFrame({
-                "Timestamp": hist.index,
-                "MidPrice": hist.values
-            })
-            st.write(f"Random Item: {random_item_id} - {names.get(int(random_item_id),'Unknown')} (High={high}, Low={low}, Mid={mid_price:.2f})")
-            st.write(f"Historical Mean: {hist_mean:.2f}, Std: {hist_std:.2f}, Z-score: {z:.2f}")
-            st.dataframe(debug_df)
-            hist_debug_shown = True
-    attempts += 1
+if mid_price:
+    hist = fetch_history(int(random_item_id))
+    if hist is not None:
+        z = (mid_price - hist.mean()) / hist.std(ddof=0) if hist.std(ddof=0) > 0 else 0
+        st.write(f"Random Item {random_item_id}: Mid={mid_price}, Z={z:.2f}")
+        st.dataframe(pd.DataFrame({"MidPrice": hist.values}, index=hist.index))
+    else:
+        st.write(f"No historical data parsed for item {random_item_id}")
+else:
+    st.write(f"Random item {random_item_id} has invalid prices")
 
 if not hist_debug_shown:
     st.write("No historical data found for 10 random items. Z-scores will be unavailable.")
