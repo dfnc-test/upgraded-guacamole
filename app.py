@@ -91,62 +91,83 @@ def calculate_trades(prices, volumes, names, limits, table_type):
 
 # ---------- TABLE RENDERING ----------
 def render_table(df, table_key):
-    if df.empty: 
+    if df.empty:
         st.write("No trades found.")
         return
 
-    # Headers
-    headers = ["", "Item", "Buy", "Sell", "Margin", "ROI %", "Volume", "Buy Limit", "Profit/Limit", "Profit/Hr", "Conf", "Add"]
     st.markdown(
         """
         <style>
-        .tight td, .tight th {padding:2px 4px; font-size:12px;}
+        .trade-table {border-collapse: collapse; width: 100%;}
+        .trade-table th, .trade-table td {padding: 4px 6px; font-size: 13px; text-align:center; vertical-align: middle;}
+        .trade-table th {background-color: #f2f2f2;}
+        .trade-table td img {vertical-align: middle;}
+        .add-btn {width:30px; height:30px; text-align:center;}
         </style>
-        """, unsafe_allow_html=True)
-    st.markdown("<div style='display:flex; font-weight:bold; border-bottom:1px solid #aaa;'>"
-                + "".join([f"<div style='flex:{1 if i>0 else 0.1}'>{h}</div>" for i,h in enumerate(headers)])
-                + "</div>", unsafe_allow_html=True)
+        """, unsafe_allow_html=True
+    )
 
-    # Rows
+    st.markdown("<table class='trade-table'>", unsafe_allow_html=True)
+    # Headers
+    st.markdown("<tr>"
+                "<th></th><th>Item</th><th>Buy</th><th>Sell</th><th>Margin</th><th>ROI %</th>"
+                "<th>Volume</th><th>Buy Limit</th><th>Profit/Limit</th><th>Profit/Hr</th><th>Conf</th><th>Add</th>"
+                "</tr>", unsafe_allow_html=True)
+
     for idx, row in df.iterrows():
-        cols = st.columns([0.1,2,1,1,1,1,1,1,1,1,0.5,0.3])
-        with cols[0]: st.markdown(f'<img src="{row["Image"]}" width="20">', unsafe_allow_html=True)
-        with cols[1]: st.write(row["Item"])
-        with cols[2]: st.markdown(f'<span style="color:green">{row["Buy"]}</span>', unsafe_allow_html=True)
-        with cols[3]: st.markdown(f'<span style="color:red">{row["Sell"]}</span>', unsafe_allow_html=True)
-        # margin gradient subtle
         margin_color = f"rgb({max(0,150-abs(row['Margin']))},{min(150,row['Margin'])},0)"
-        with cols[4]: st.markdown(f'<span style="color:{margin_color}">{row["Margin"]}</span>', unsafe_allow_html=True)
-        for i,col_name in enumerate(["ROI %","Volume","Buy Limit","Profit per Limit","Profit per Hour","Confidence"]):
-            with cols[5+i]: st.markdown(f'<span style="color:#555">{row[col_name]}</span>', unsafe_allow_html=True)
-        with cols[11]:
-            if st.button("➕", key=f"{table_key}_{idx}"):
-                if "watchlist" not in st.session_state: st.session_state.watchlist = load_watchlist()
-                if row["Item"] not in [w["Item"] for w in st.session_state.watchlist]:
-                    st.session_state.watchlist.append({
-                        "Item": row["Item"],
-                        "Image": row["Image"],
-                        "Buy": row["Buy"],
-                        "Sell": row["Sell"],
-                        "Volume": row["Volume"]
-                    })
-                    save_watchlist(st.session_state.watchlist)
+        st.markdown(f"<tr>"
+                    f"<td><img src='{row['Image']}' width='25'></td>"
+                    f"<td style='text-align:left'>{row['Item']}</td>"
+                    f"<td style='color:green'>{row['Buy']}</td>"
+                    f"<td style='color:red'>{row['Sell']}</td>"
+                    f"<td style='color:{margin_color}'>{row['Margin']}</td>"
+                    f"<td style='color:#555'>{row['ROI %']}</td>"
+                    f"<td style='color:#555'>{row['Volume']}</td>"
+                    f"<td style='color:#555'>{row['Buy Limit']}</td>"
+                    f"<td style='color:#555'>{row['Profit per Limit']}</td>"
+                    f"<td style='color:#555'>{row['Profit per Hour']}</td>"
+                    f"<td style='color:#555'>{row['Confidence']}</td>"
+                    f"<td class='add-btn'>{st.button('➕', key=f'{table_key}_{idx}')}</td>"
+                    f"</tr>", unsafe_allow_html=True)
+        # Watchlist add logic
+        if st.session_state.get(f'{table_key}_{idx}', False):
+            if "watchlist" not in st.session_state: st.session_state.watchlist = load_watchlist()
+            if row["Item"] not in [w["Item"] for w in st.session_state.watchlist]:
+                st.session_state.watchlist.append({
+                    "Item": row["Item"],
+                    "Image": row["Image"],
+                    "Buy": row["Buy"],
+                    "Sell": row["Sell"],
+                    "Volume": row["Volume"]
+                })
+                save_watchlist(st.session_state.watchlist)
 
-# ---------- WATCHLIST RENDERING ----------
+    st.markdown("</table>", unsafe_allow_html=True)
+
+# ---------- WATCHLIST ----------
 def render_watchlist():
     st.sidebar.header("👁️ Watchlist")
     watchlist = st.session_state.get("watchlist", load_watchlist())
     if not watchlist:
         st.sidebar.write("No trades added yet.")
         return
+
     for idx, row in enumerate(watchlist):
-        st.sidebar.markdown("<div style='display:flex; align-items:center; padding:5px; border:1px solid #ccc; margin-bottom:4px; border-radius:5px;'>"
-                            f"<img src='{row['Image']}' width='30' style='margin-right:8px;'>"
-                            f"<div style='flex:1'>{row['Item']}</div>"
-                            f"<div style='color:green; margin-right:5px'>{row['Buy']}</div>"
-                            f"<div style='color:red; margin-right:5px'>{row['Sell']}</div>"
-                            f"<div style='color:#555'>{row['Volume']}</div>"
-                            "</div>", unsafe_allow_html=True)
+        st.sidebar.markdown(
+            f"<div style='display:flex; align-items:center; padding:6px; margin-bottom:4px; border:1px solid #ccc; border-radius:5px;'>"
+            f"<img src='{row['Image']}' width='35' style='margin-right:8px;'>"
+            f"<div style='flex:1'>{row['Item']}</div>"
+            f"<div style='color:green; margin-right:5px'>{row['Buy']}</div>"
+            f"<div style='color:red; margin-right:5px'>{row['Sell']}</div>"
+            f"<div style='color:#555'>{row['Volume']}</div>"
+            f"<div>{st.button('❌', key=f'remove_{idx}')}</div>"
+            f"</div>", unsafe_allow_html=True
+        )
+        if st.session_state.get(f'remove_{idx}', False):
+            st.session_state.watchlist.pop(idx)
+            save_watchlist(st.session_state.watchlist)
+            st.session_state[f'remove_{idx}'] = False
 
 # ---------- MAIN ----------
 st.set_page_config(page_title="OSRS GE Dashboard", layout="wide")
