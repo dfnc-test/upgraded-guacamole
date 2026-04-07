@@ -70,7 +70,6 @@ def load_watchlist():
             except:
                 return []
     return []
-------------------------------------------------------------
 
 import random
 
