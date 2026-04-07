@@ -36,11 +36,14 @@ def fetch_data():
 
 @st.cache_data(ttl=3600)
 def fetch_history(item_id):
-    """Fetch historical midpoint prices for Z-score calculation"""
+    """Fetch historical midpoint prices for Z-score calculation."""
     try:
-        url = f"{HISTORY_URL}?timestep=1h&id={item_id}"  # hourly data
+        url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?timestep=1h&id={item_id}"
         res = requests.get(url, headers=HEADERS, timeout=20).json()
+        # The API returns a dict with a 'data' key containing a list for the item_id
         data_list = res.get("data", {}).get(str(item_id), [])
+        if not data_list:
+            return None
 
         prices = []
         timestamps = []
@@ -60,11 +63,11 @@ def fetch_history(item_id):
 
         if len(prices) < 3:
             return None
+
         return pd.Series(prices, index=timestamps)
     except Exception as e:
         st.warning(f"Error fetching history for {item_id}: {e}")
         return None
-
 def save_watchlist(watchlist):
     with open(WATCHLIST_FILE, "w") as f:
         json.dump(watchlist, f)
