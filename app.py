@@ -81,30 +81,51 @@ def calculate_flips(prices, volumes, names, limits):
 
 # ---------- UI TABLE WITH ADD BUTTONS ----------
 def render_table_with_add(df, table_key):
-    df = df.copy()
     if df.empty: 
         st.write("No trades found.")
         return
-    df["Image"] = df["Image"].apply(lambda url: f'<img src="{url}" width="20" style="vertical-align:middle">')
+
+    # Table headers
+    headers = ["", "Item", "Buy", "Sell", "Margin", "ROI %", "Volume", "Buy Limit", "Profit/Limit", "Profit/Hr", "Conf", "Add"]
+
+    st.markdown(
+        f"""
+        <style>
+        .tight td {{padding:2px 5px;}}
+        .tight th {{padding:2px 5px;}}
+        </style>
+        """, unsafe_allow_html=True)
+
+    # Iterate rows
     for idx, row in df.iterrows():
-        cols = st.columns([0.1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 0.5])
-        with cols[0]: st.markdown(row["Image"], unsafe_allow_html=True)
+        # Columns layout
+        cols = st.columns([0.1,2,1,1,1,1,1,1,1,1,0.5,0.3])
+        # Image
+        with cols[0]: st.markdown(f'<img src="{row["Image"]}" width="20" style="vertical-align:middle">', unsafe_allow_html=True)
+        # Item
         with cols[1]: st.write(row["Item"])
-        with cols[2]: st.write(row["Buy"])
-        with cols[3]: st.write(row["Sell"])
-        with cols[4]: st.write(row["Margin"])
+        # Buy green
+        with cols[2]: st.markdown(f'<span style="color:green">{row["Buy"]}</span>', unsafe_allow_html=True)
+        # Sell red
+        with cols[3]: st.markdown(f'<span style="color:red">{row["Sell"]}</span>', unsafe_allow_html=True)
+        # Margin gradient
+        margin_color = "red" if row["Margin"]<0 else f"rgb(0,{min(row['Margin'],200)},0)"
+        with cols[4]: st.markdown(f'<span style="color:{margin_color}">{row["Margin"]}</span>', unsafe_allow_html=True)
+        # ROI, Volume, Buy Limit, Profit per limit, Profit per hour, Confidence
         with cols[5]: st.write(row["ROI %"])
         with cols[6]: st.write(row["Volume"])
         with cols[7]: st.write(row["Buy Limit"])
         with cols[8]: st.write(row["Profit per Limit"])
         with cols[9]: st.write(row["Profit per Hour"])
-        with cols[10]:
+        with cols[10]: st.write(row["Confidence"])
+        # Add button
+        with cols[11]:
             if st.button("➕", key=f"{table_key}_{idx}"):
                 if "watchlist" not in st.session_state: st.session_state.watchlist = load_watchlist()
                 if row["Item"] not in [w["Item"] for w in st.session_state.watchlist]:
                     st.session_state.watchlist.append(row.to_dict())
                     save_watchlist(st.session_state.watchlist)
-                st.experimental_rerun()
+                st.session_state.table_updated = True  # trigger rerun via session_state
 
 # ---------- WATCHLIST ----------
 def render_watchlist():
@@ -113,25 +134,24 @@ def render_watchlist():
     if not watchlist:
         st.sidebar.write("No trades added yet.")
         return
-    df_watchlist = pd.DataFrame(watchlist)
-    df_watchlist["Image"] = df_watchlist["Image"].apply(lambda url: f'<img src="{url}" width="20" style="vertical-align:middle">')
-    for idx, row in df_watchlist.iterrows():
-        cols = st.sidebar.columns([0.1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 0.5])
-        with cols[0]: st.markdown(row["Image"], unsafe_allow_html=True)
-        with cols[1]: st.write(row["Item"])
-        with cols[2]: st.write(row["Buy"])
-        with cols[3]: st.write(row["Sell"])
-        with cols[4]: st.write(row["Margin"])
-        with cols[5]: st.write(row["ROI %"])
-        with cols[6]: st.write(row["Volume"])
-        with cols[7]: st.write(row["Buy Limit"])
-        with cols[8]: st.write(row["Profit per Limit"])
-        with cols[9]: st.write(row["Profit per Hour"])
+    for idx, row in enumerate(watchlist):
+        cols = st.sidebar.columns([0.1,2,1,1,1,1,1,1,1,1,0.5])
+        with cols[0]: st.sidebar.markdown(f'<img src="{row["Image"]}" width="20">', unsafe_allow_html=True)
+        with cols[1]: st.sidebar.write(row["Item"])
+        with cols[2]: st.sidebar.markdown(f'<span style="color:green">{row["Buy"]}</span>', unsafe_allow_html=True)
+        with cols[3]: st.sidebar.markdown(f'<span style="color:red">{row["Sell"]}</span>', unsafe_allow_html=True)
+        margin_color = "red" if row["Margin"]<0 else f"rgb(0,{min(row['Margin'],200)},0)"
+        with cols[4]: st.sidebar.markdown(f'<span style="color:{margin_color}">{row["Margin"]}</span>', unsafe_allow_html=True)
+        with cols[5]: st.sidebar.write(row["ROI %"])
+        with cols[6]: st.sidebar.write(row["Volume"])
+        with cols[7]: st.sidebar.write(row["Buy Limit"])
+        with cols[8]: st.sidebar.write(row["Profit per Limit"])
+        with cols[9]: st.sidebar.write(row["Profit per Hour"])
         with cols[10]:
-            if st.button("❌", key=f"remove_{idx}"):
+            if st.sidebar.button("❌", key=f"remove_{idx}"):
                 st.session_state.watchlist.pop(idx)
                 save_watchlist(st.session_state.watchlist)
-                st.experimental_rerun()
+                st.session_state.table_updated = True
 
 # ---------- MAIN ----------
 st.set_page_config(page_title="OSRS GE Dashboard", layout="wide")
@@ -139,20 +159,23 @@ st.title("📊 OSRS GE Dashboard")
 
 prices, volumes, names, limits = fetch_data()
 if "watchlist" not in st.session_state: st.session_state.watchlist = load_watchlist()
+if "table_updated" not in st.session_state: st.session_state.table_updated = False
 
-# Example tables: Regular, High Volume, Speculative
 st.subheader("💰 Regular Profitable Trades")
 regular_df = calculate_flips(prices, volumes, names, limits)
 render_table_with_add(regular_df, "regular")
 
-# Placeholder for High Volume table
 st.subheader("🟢 High Volume Flips")
 high_vol_df = regular_df.sort_values("Volume", ascending=False).head(20)
 render_table_with_add(high_vol_df, "highvol")
 
-# Placeholder for Speculative / Underpriced table
 st.subheader("🔵 Speculative Trades")
 speculative_df = regular_df.sort_values("Confidence", ascending=False).head(20)
 render_table_with_add(speculative_df, "speculative")
 
 render_watchlist()
+
+# Rerun logic
+if st.session_state.table_updated:
+    st.session_state.table_updated = False
+    st.experimental_rerun()
