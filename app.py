@@ -11,12 +11,10 @@ MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping"
 HEADERS = {"User-Agent": "osrs-ge-dashboard (redsnowcp@gmail.com)"}
 
 GE_TAX = 0.05
-HIGH_VALUE_THRESHOLD = 1_000_000
 MIN_VOLUME = 500
 MIN_MARGIN = 20
 BUY_LIMIT_HOURS = 4
-
-WATCHLIST_FILE = "watchlist.json"  # File to persist watchlist
+WATCHLIST_FILE = "watchlist.json"
 
 # ---------- HELPERS ----------
 def get_image_url(name):
@@ -35,8 +33,7 @@ def fetch_data():
     mapping = requests.get(MAPPING_URL, headers=HEADERS, timeout=10).json()
     id_to_name = {item["id"]: item["name"] for item in mapping}
     id_to_limit = {item["id"]: item.get("limit", 0) for item in mapping}
-    id_to_type = {item["id"]: item.get("type", "") for item in mapping}
-    return prices, volumes, id_to_name, id_to_limit, id_to_type
+    return prices, volumes, id_to_name, id_to_limit
 
 def save_watchlist(watchlist):
     with open(WATCHLIST_FILE, "w") as f:
@@ -94,34 +91,60 @@ def calculate_flips(prices, volumes, names, limits):
     return pd.DataFrame(rows).sort_values(by="Profit per Hour", ascending=False).head(20)
 
 # ---------- DISPLAY ----------
-def render_table_with_watchlist_buttons(df, key_prefix):
-    """
-    Render the dataframe with icons, plus Add buttons per row.
-    """
+def render_table_with_add_buttons(df, table_key):
     df = df.copy()
+    # Add icon HTML
     df["Image"] = df["Image"].apply(lambda url: f'<img src="{url}" width="20" style="vertical-align:middle">')
+
+    # Add empty Add button column placeholder, will be replaced by buttons below
+    df["Add"] = ""
+
+    # Rearrange columns to put Image first, Add last
     cols = df.columns.tolist()
     cols.insert(0, cols.pop(cols.index("Image")))
+    cols.append(cols.pop(cols.index("Add")))
     df = df[cols]
 
+    # Render base table HTML without the Add column content
+    base_html = df.drop(columns=["Add"]).to_html(escape=False, index=False)
+
+    # Build buttons HTML for Add column
+    buttons_html = ""
+    for idx in range(len(df)):
+        button_id = f"{table_key}_add_{idx}"
+        # Buttons must be outside html, so will create empty column here and add Streamlit buttons below
+        buttons_html += f'<td><button id="{button_id}">Add</button></td>'
+
+    # Inject buttons column into the table html manually by replacing the </tr> tags
+    # We do this by splitting table rows and inserting buttons per row
+    rows_html = base_html.split("</tr>")
+    # The first row is headers - add <th>Add</th> header
+    header = rows_html[0].replace("</tr>", "<th>Add</th></tr>")
+    new_rows_html = [header]
+
+    # For each data row, append the corresponding button html
+    for i, row_html in enumerate(rows_html[1:-1]):
+        new_row = row_html + buttons_html.split("</td>")[i] + "</td></tr>"
+        new_rows_html.append(new_row)
+
+    new_rows_html.append(rows_html[-1])  # closing tags
+
+    final_html = "".join(new_rows_html)
+
+    st.markdown(final_html, unsafe_allow_html=True)
+
+    # Now add actual Streamlit buttons aligned with rows below the table for interaction
     for idx, row in df.iterrows():
-        cols = st.columns([0.1, 0.8, 4, 1])
-        with cols[0]:
-            st.markdown(row["Image"], unsafe_allow_html=True)
-        with cols[1]:
-            st.write(row["Item"])
-        with cols[2]:
-            # Show details nicely
-            detail_text = ", ".join([f"**{k}**: {v}" for k,v in row.items() if k not in ["Image", "Item"]])
-            st.markdown(detail_text)
-        with cols[3]:
-            button_key = f"{key_prefix}_{idx}"
-            if st.button("➕ Add", key=button_key):
+        col1, col2, col3 = st.columns([0.9, 8, 1])
+        with col3:
+            button_label = f"Add '{row['Item']}'"
+            button_key = f"{table_key}_btn_{idx}"
+            if st.button(button_label, key=button_key):
                 if "watchlist" not in st.session_state:
                     st.session_state.watchlist = load_watchlist()
-                # Prevent duplicates by Item name
+                # Avoid duplicates by Item name
                 if row["Item"] not in [w["Item"] for w in st.session_state.watchlist]:
-                    st.session_state.watchlist.append(row.to_dict())
+                    st.session_state.watchlist.append(row.drop(labels=["Add"]).to_dict())
                     save_watchlist(st.session_state.watchlist)
                 st.experimental_rerun()
 
@@ -137,28 +160,25 @@ def render_watchlist():
     cols.insert(0, cols.pop(cols.index("Image")))
     df_watchlist = df_watchlist[cols]
 
-    # Display each row with Remove button
+    # Render watchlist table HTML
+    html = df_watchlist.to_html(escape=False, index=False)
+
+    # Display the table
+    st.sidebar.markdown(html, unsafe_allow_html=True)
+
+    # Render Remove buttons aligned with rows
     for idx, row in df_watchlist.iterrows():
-        cols = st.sidebar.columns([0.1, 1.2, 4, 1])
-        with cols[0]:
-            st.markdown(row["Image"], unsafe_allow_html=True)
-        with cols[1]:
-            st.write(row["Item"])
-        with cols[2]:
-            detail_text = ", ".join([f"**{k}**: {v}" for k,v in row.items() if k not in ["Image", "Item"]])
-            st.markdown(detail_text)
-        with cols[3]:
-            button_key = f"remove_{idx}"
-            if st.button("❌ Remove", key=button_key):
-                st.session_state.watchlist.pop(idx)
-                save_watchlist(st.session_state.watchlist)
-                st.experimental_rerun()
+        btn_key = f"remove_btn_{idx}"
+        if st.sidebar.button(f"❌ Remove '{row['Item']}'", key=btn_key):
+            st.session_state.watchlist.pop(idx)
+            save_watchlist(st.session_state.watchlist)
+            st.experimental_rerun()
 
 # ---------- MAIN ----------
-st.set_page_config(page_title="OSRS GE Dashboard with Persistent Watchlist", layout="wide")
-st.title("📊 OSRS GE Dashboard with Persistent Watchlist")
+st.set_page_config(page_title="OSRS GE Dashboard with Watchlist Buttons", layout="wide")
+st.title("📊 OSRS GE Dashboard with Watchlist Buttons")
 
-prices, volumes, names, limits, types = fetch_data()
+prices, volumes, names, limits = fetch_data()
 
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = load_watchlist()
@@ -168,6 +188,6 @@ regular_df = calculate_flips(prices, volumes, names, limits)
 if regular_df.empty:
     st.write("No regular trades found.")
 else:
-    render_table_with_watchlist_buttons(regular_df, "regular")
+    render_table_with_add_buttons(regular_df, "regular")
 
 render_watchlist()
