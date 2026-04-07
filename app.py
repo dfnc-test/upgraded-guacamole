@@ -1,182 +1,193 @@
 import streamlit as st
 import requests
 import pandas as pd
+import json
+import os
 
-# ================= CONFIG =================
+# ---------- CONFIG ----------
 LATEST_URL = "https://prices.runescape.wiki/api/v1/osrs/latest"
 VOLUME_URL = "https://prices.runescape.wiki/api/v1/osrs/24h"
 MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping"
+HEADERS = {"User-Agent": "osrs-ge-dashboard (redsnowcp@gmail.com)"}
 
-HEADERS = {"User-Agent": "GE-Trading-Dashboard redsnowcp@gmail.com"}
+GE_TAX = 0.05
+MIN_VOLUME = 500
+MIN_MARGIN = 20
+BUY_LIMIT_HOURS = 4
+WATCHLIST_FILE = "watchlist.json"
 
-STOP_LOSS_PCT = 0.03
-TAKE_PROFIT_PCT = 0.05
-HIGH_VALUE_THRESHOLD = 1_000_000
-# ==========================================
-
-# ---------- Helpers ----------
+# ---------- HELPERS ----------
 def get_image_url(name):
-    formatted = name.replace(" ", "_").replace("'", "").replace("(", "").replace(")", "")
+    formatted = (
+        name.replace(" ", "_")
+        .replace("'", "")
+        .replace("(", "")
+        .replace(")", "")
+    )
     return f"https://oldschool.runescape.wiki/images/{formatted}.png"
 
 @st.cache_data(ttl=60)
 def fetch_data():
-    prices = requests.get(LATEST_URL, headers=HEADERS, timeout=5).json()["data"]
-    volumes = requests.get(VOLUME_URL, headers=HEADERS, timeout=5).json()["data"]
-    mapping = requests.get(MAPPING_URL, headers=HEADERS, timeout=5).json()
+    prices = requests.get(LATEST_URL, headers=HEADERS, timeout=10).json()["data"]
+    volumes = requests.get(VOLUME_URL, headers=HEADERS, timeout=10).json()["data"]
+    mapping = requests.get(MAPPING_URL, headers=HEADERS, timeout=10).json()
     id_to_name = {item["id"]: item["name"] for item in mapping}
-    return prices, volumes, id_to_name
+    id_to_limit = {item["id"]: item.get("limit", 0) for item in mapping}
+    return prices, volumes, id_to_name, id_to_limit
 
-def analyze_items(prices, volumes, names, capital, mode):
+def save_watchlist(watchlist):
+    with open(WATCHLIST_FILE, "w") as f:
+        json.dump(watchlist, f)
+
+def load_watchlist():
+    if os.path.exists(WATCHLIST_FILE):
+        with open(WATCHLIST_FILE, "r") as f:
+            try:
+                data = json.load(f)
+                return data
+            except json.JSONDecodeError:
+                return []
+    return []
+
+# ---------- CALCULATIONS ----------
+def calculate_flips(prices, volumes, names, limits):
     rows = []
-
-    # Mode filters
-    if mode == "Safe":
-        min_volume, min_margin, min_roi, max_real_roi, max_fill_time = 1000, 50, 0.005, 0.08, 2
-    else:
-        min_volume, min_margin, min_roi, max_real_roi, max_fill_time = 100, 20, 0.002, 0.15, 6
-
     for item_id, data in prices.items():
         item_id = int(item_id)
-        high = data.get("high")
-        low = data.get("low")
+        high, low = data.get("high"), data.get("low")
+        if not high or not low or low <= 0:
+            continue
         vol_data = volumes.get(str(item_id), {})
-        vol = vol_data.get("volume", 0) or vol_data.get("high", 0)
-        if not high or not low or low == 0 or vol < min_volume:
+        volume = vol_data.get("highPriceVolume",0) + vol_data.get("lowPriceVolume",0)
+        if volume < MIN_VOLUME:
             continue
-
-        margin = high - low
-        roi = margin / low
-        if margin < min_margin or roi < min_roi:
+        real_sell = high * (1 - GE_TAX)
+        real_margin = real_sell - low
+        if real_margin < MIN_MARGIN:
             continue
-
-        # Realistic prices
-        real_buy = int(low * 1.01)
-        real_sell = int(high * 0.99 * 0.985)  # GE tax
-        real_margin = real_sell - real_buy
-        if real_margin <= 0:
-            continue
-        real_roi = real_margin / real_buy
-        if real_roi > max_real_roi:
-            continue
-
-        fills_per_hour = vol / 24
-        trade_size = min(capital // real_buy, int(vol * 0.1))
-        if fills_per_hour == 0 or trade_size == 0:
-            continue
-        time_to_fill = trade_size / fills_per_hour
-        if time_to_fill > max_fill_time:
-            continue
-
-        stop_loss = int(real_buy * (1 - STOP_LOSS_PCT))
-        take_profit = int(real_buy * (1 + TAKE_PROFIT_PCT))
-        buy_limit = vol // 6
-        profit_per_hour = round(real_margin * fills_per_hour, 2)
-        profit_per_limit = round(real_margin * buy_limit, 2)
-        confidence = round((vol / 1000) * real_roi * real_margin, 2)
-
+        roi = real_margin / low
+        buy_limit = limits.get(item_id, 0)
+        profit_per_limit = real_margin * buy_limit
+        fills_per_hour = volume / 24
+        time_to_sell_hours = min(buy_limit / fills_per_hour, BUY_LIMIT_HOURS) if fills_per_hour>0 else 0.1
+        profit_per_hour = profit_per_limit / max(time_to_sell_hours,0.1)
+        volume_score = min(volume / 100_000, 1)
+        margin_score = min(real_margin / 1000, 1)
+        roi_score = min(roi / 0.1, 1)
+        confidence_score = round((volume_score + margin_score + roi_score)/3*100,1)
         rows.append({
-            "Item": names.get(item_id, "Unknown"),
-            "Buy": real_buy,
-            "Sell": real_sell,
-            "Margin": real_margin,
-            "ROI %": round(real_roi*100,2),
-            "Volume": vol,
+            "Image": get_image_url(names.get(item_id,"Unknown")),
+            "Item": names.get(item_id,"Unknown"),
+            "Buy": low,
+            "Sell": int(real_sell),
+            "Margin": int(real_margin),
+            "ROI %": round(roi*100,2),
+            "Volume": volume,
             "Buy Limit": buy_limit,
-            "Profit per Limit": profit_per_limit,
-            "Profit per Hour": profit_per_hour,
-            "Confidence": confidence,
-            "Image": get_image_url(names.get(item_id, "Unknown"))
+            "Profit per Limit": int(profit_per_limit),
+            "Profit per Hour": int(profit_per_hour),
+            "Confidence": confidence_score
         })
+    return pd.DataFrame(rows).sort_values(by="Profit per Hour", ascending=False).head(20)
 
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df, df, df, 0
+# ---------- DISPLAY ----------
+def render_table_with_add_buttons(df, table_key):
+    df = df.copy()
+    # Add icon HTML
+    df["Image"] = df["Image"].apply(lambda url: f'<img src="{url}" width="20" style="vertical-align:middle">')
 
-    df = df.sort_values(by="Confidence", ascending=False)
-    normal = df[df["Buy"] < HIGH_VALUE_THRESHOLD].head(15)
-    high_value = df[df["Buy"] >= HIGH_VALUE_THRESHOLD].head(10)
-    speculative = df.sample(min(10, len(df)))
-    return normal, high_value, speculative, len(df)
+    # Add empty Add button column placeholder, will be replaced by buttons below
+    df["Add"] = ""
 
-# ---------- UI ----------
-st.set_page_config(page_title="OSRS GE Dashboard", layout="centered")
-st.title("📊 OSRS GE Trading Dashboard")
-mode = st.selectbox("Mode", ["Relaxed", "Safe"])
-capital = st.number_input("Available GP", value=10_000_000, step=1_000_000)
+    # Rearrange columns to put Image first, Add last
+    cols = df.columns.tolist()
+    cols.insert(0, cols.pop(cols.index("Image")))
+    cols.append(cols.pop(cols.index("Add")))
+    df = df[cols]
 
-prices, volumes, names = fetch_data()
-normal, high_value, speculative, total_found = analyze_items(prices, volumes, names, capital, mode)
-st.write(f"🔍 Total viable trades found: {total_found}")
+    # Render base table HTML without the Add column content
+    base_html = df.drop(columns=["Add"]).to_html(escape=False, index=False)
 
-# ---------- Watchlist ----------
-if "watchlist" not in st.session_state:
-    st.session_state.watchlist = []
+    # Build buttons HTML for Add column
+    buttons_html = ""
+    for idx in range(len(df)):
+        button_id = f"{table_key}_add_{idx}"
+        # Buttons must be outside html, so will create empty column here and add Streamlit buttons below
+        buttons_html += f'<td><button id="{button_id}">Add</button></td>'
 
-def render_table(df, table_key):
-    st.write(f"<table style='border-collapse: collapse; width:100%;'>", unsafe_allow_html=True)
-    st.write("""
-    <tr style='border-bottom:1px solid #ccc;'>
-        <th>Item</th><th>Buy</th><th>Sell</th><th>Margin</th><th>ROI %</th>
-        <th>Volume</th><th>Buy Limit</th><th>Profit/Limit</th><th>Profit/Hour</th>
-        <th>Confidence</th><th>Add</th>
-    </tr>
-    """, unsafe_allow_html=True)
+    # Inject buttons column into the table html manually by replacing the </tr> tags
+    # We do this by splitting table rows and inserting buttons per row
+    rows_html = base_html.split("</tr>")
+    # The first row is headers - add <th>Add</th> header
+    header = rows_html[0].replace("</tr>", "<th>Add</th></tr>")
+    new_rows_html = [header]
 
+    # For each data row, append the corresponding button html
+    for i, row_html in enumerate(rows_html[1:-1]):
+        new_row = row_html + buttons_html.split("</td>")[i] + "</td></tr>"
+        new_rows_html.append(new_row)
+
+    new_rows_html.append(rows_html[-1])  # closing tags
+
+    final_html = "".join(new_rows_html)
+
+    st.markdown(final_html, unsafe_allow_html=True)
+
+    # Now add actual Streamlit buttons aligned with rows below the table for interaction
     for idx, row in df.iterrows():
-        margin_color = f"rgb({max(0,150-row['Margin'])},{min(150,row['Margin'])},0)" if row['Margin'] >=0 else "red"
-        st.write(f"""
-        <tr style='border-bottom:1px solid #ddd;'>
-            <td>{row['Item']}</td>
-            <td style='color:green'>{row['Buy']}</td>
-            <td style='color:red'>{row['Sell']}</td>
-            <td style='color:{margin_color}'>{row['Margin']}</td>
-            <td style='color:#555'>{row['ROI %']}</td>
-            <td style='color:#555'>{row['Volume']}</td>
-            <td style='color:#555'>{row['Buy Limit']}</td>
-            <td style='color:#555'>{row['Profit per Limit']}</td>
-            <td style='color:#555'>{row['Profit per Hour']}</td>
-            <td style='color:#555'>{row['Confidence']}</td>
-            <td style='text-align:center;'>""", unsafe_allow_html=True)
-        if st.button("➕", key=f"{table_key}_add_{idx}", help=f"Add {row['Item']} to Watchlist"):
-            st.session_state.watchlist.append({
-                "Item": row['Item'],
-                "Buy": row['Buy'],
-                "Sell": row['Sell'],
-                "Volume": row['Volume'],
-                "Image": row['Image']
-            })
-        st.write("</td></tr>", unsafe_allow_html=True)
-    st.write("</table>", unsafe_allow_html=True)
+        col1, col2, col3 = st.columns([0.9, 8, 1])
+        with col3:
+            button_label = f"Add '{row['Item']}'"
+            button_key = f"{table_key}_btn_{idx}"
+            if st.button(button_label, key=button_key):
+                if "watchlist" not in st.session_state:
+                    st.session_state.watchlist = load_watchlist()
+                # Avoid duplicates by Item name
+                if row["Item"] not in [w["Item"] for w in st.session_state.watchlist]:
+                    st.session_state.watchlist.append(row.drop(labels=["Add"]).to_dict())
+                    save_watchlist(st.session_state.watchlist)
+                st.experimental_rerun()
 
-# --------- Display Tables ----------
-st.subheader("🟢 Profitable Flips")
-if normal.empty:
-    st.write("No trades found.")
-else:
-    render_table(normal, "normal")
+def render_watchlist():
+    st.sidebar.header("👁️ Watchlist")
+    watchlist = st.session_state.get("watchlist", load_watchlist())
+    if not watchlist:
+        st.sidebar.write("No trades added yet.")
+        return
+    df_watchlist = pd.DataFrame(watchlist)
+    df_watchlist["Image"] = df_watchlist["Image"].apply(lambda url: f'<img src="{url}" width="20" style="vertical-align:middle">')
+    cols = df_watchlist.columns.tolist()
+    cols.insert(0, cols.pop(cols.index("Image")))
+    df_watchlist = df_watchlist[cols]
 
-st.subheader("🔵 High Value Trades")
-if high_value.empty:
-    st.write("No high-value trades currently.")
-else:
-    render_table(high_value, "high_value")
+    # Render watchlist table HTML
+    html = df_watchlist.to_html(escape=False, index=False)
 
-st.subheader("🟠 Speculative / Underpriced Trades")
-if speculative.empty:
-    st.write("No speculative trades currently.")
-else:
-    render_table(speculative, "speculative")
+    # Display the table
+    st.sidebar.markdown(html, unsafe_allow_html=True)
 
-# --------- Display Watchlist ----------
-st.subheader("🟣 Watchlist")
-for idx, item in enumerate(st.session_state.watchlist):
-    cols = st.columns([1,3])
-    with cols[0]:
-        st.image(item['Image'], width=50)
-    with cols[1]:
-        st.markdown(f"**{item['Item']}**")
-        st.write(f"Buy: {item['Buy']} | Sell: {item['Sell']} | Volume: {item['Volume']}")
-        if st.button("❌ Remove", key=f"watch_remove_{idx}"):
+    # Render Remove buttons aligned with rows
+    for idx, row in df_watchlist.iterrows():
+        btn_key = f"remove_btn_{idx}"
+        if st.sidebar.button(f"❌ Remove '{row['Item']}'", key=btn_key):
             st.session_state.watchlist.pop(idx)
+            save_watchlist(st.session_state.watchlist)
             st.experimental_rerun()
+
+# ---------- MAIN ----------
+st.set_page_config(page_title="OSRS GE Dashboard with Watchlist Buttons", layout="wide")
+st.title("📊 OSRS GE Dashboard with Watchlist Buttons")
+
+prices, volumes, names, limits = fetch_data()
+
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = load_watchlist()
+
+st.subheader("💰 Regular Profitable Trades")
+regular_df = calculate_flips(prices, volumes, names, limits)
+if regular_df.empty:
+    st.write("No regular trades found.")
+else:
+    render_table_with_add_buttons(regular_df, "regular")
+
+render_watchlist()
