@@ -83,14 +83,14 @@ mid_price = (high + low) / 2 if high and low else None
 
 if mid_price:
     hist = fetch_history(item_id)
-if hist is not None and len(hist) >= 3:
-    hist_mean = hist[-7:].mean()  # last 7 days
-    hist_std = hist[-7:].std(ddof=0)
-    z = (mid_price - hist_mean) / hist_std if hist_std > 0 else 0.0
-    debug_df = pd.DataFrame({
-            "Timestamp": hist.index,
-            "MidPrice": hist.values
-        })
+    if hist is not None and len(hist) >= 3:
+        hist_mean = hist[-7:].mean()  # last 7 days
+        hist_std = hist[-7:].std(ddof=0)
+        z = (mid_price - hist_mean) / hist_std if hist_std > 0 else 0.0
+        debug_df = pd.DataFrame({
+                "Timestamp": hist.index,
+                "MidPrice": hist.values
+            })
         st.write(f"Random Item: {random_item_id} - {high}/{low} (Mid={mid_price})")
         st.write(f"Historical Mean: {hist.mean():.2f}, Std: {hist.std(ddof=0):.2f}, Z-score: {z:.2f}")
         st.dataframe(debug_df)
