@@ -38,24 +38,29 @@ def fetch_data():
 def fetch_history(item_id):
     """Fetch historical midpoint prices for Z-score calculation"""
     try:
-        url = f"{HISTORY_URL}?timestep=1h&id={item_id}"  # hourly data works well
+        url = f"{HISTORY_URL}?timestep=1h&id={item_id}"  # hourly data
         res = requests.get(url, headers=HEADERS, timeout=20).json()
-        data = res.get("data", {}).get(str(item_id), [])
+        data_list = res.get("data", {}).get(str(item_id), [])  # <- list of dicts
 
         prices = []
-        for point in data:
+        timestamps = []
+        for point in data_list:
             high = point.get("avgHighPrice")
             low = point.get("avgLowPrice")
+            ts = point.get("timestamp")
             if high is not None and low is not None:
                 prices.append((high + low) / 2)
+                timestamps.append(ts)
             elif high is not None:
                 prices.append(high)
+                timestamps.append(ts)
             elif low is not None:
                 prices.append(low)
+                timestamps.append(ts)
 
         if len(prices) < 3:
             return None
-        return pd.Series(prices)
+        return pd.Series(prices, index=timestamps)
     except Exception as e:
         st.warning(f"Error fetching history for {item_id}: {e}")
         return None
