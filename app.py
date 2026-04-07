@@ -33,7 +33,7 @@ def fetch_data():
     id_to_name = {item["id"]: item["name"] for item in mapping}
     id_to_limit = {item["id"]: item.get("limit", 0) for item in mapping}
     return prices, volumes, id_to_name, id_to_limit
-
+@st.cache_data(ttl=3600)
 def fetch_history(item_id):
     """Fetch historical midpoint prices for Z-score"""
     try:
@@ -70,6 +70,36 @@ def load_watchlist():
             except:
                 return []
     return []
+------------------------------------------------------------
+
+import random
+
+st.subheader("🛠️ Debug Z-Score for Random Item")
+
+# pick a random item
+random_item_id = random.choice(list(prices.keys()))
+random_item_data = prices[random_item_id]
+high, low = random_item_data.get("high"), random_item_data.get("low")
+mid_price = (high + low) / 2 if high and low else None
+
+if mid_price:
+    hist = fetch_history(item_id)
+if hist is not None and len(hist) >= 3:
+    hist_mean = hist[-7:].mean()  # last 7 days
+    hist_std = hist[-7:].std(ddof=0)
+    z = (mid_price - hist_mean) / hist_std if hist_std > 0 else 0.0
+        debug_df = pd.DataFrame({
+            "Timestamp": hist.index,
+            "MidPrice": hist.values
+        })
+        st.write(f"Random Item: {random_item_id} - {high}/{low} (Mid={mid_price})")
+        st.write(f"Historical Mean: {hist.mean():.2f}, Std: {hist.std(ddof=0):.2f}, Z-score: {z:.2f}")
+        st.dataframe(debug_df)
+    else:
+        st.write(f"No historical data returned for item {random_item_id}")
+else:
+    st.write(f"Random item {random_item_id} has invalid high/low prices.")
+
 
 # ---------- CALCULATIONS ----------
 def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
