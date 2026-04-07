@@ -18,12 +18,7 @@ WATCHLIST_FILE = "watchlist.json"
 
 # ---------- HELPERS ----------
 def get_image_url(name):
-    formatted = (
-        name.replace(" ", "_")
-        .replace("'", "")
-        .replace("(", "")
-        .replace(")", "")
-    )
+    formatted = name.replace(" ", "_").replace("'", "").replace("(", "").replace(")", "")
     return f"https://oldschool.runescape.wiki/images/{formatted}.png"
 
 @st.cache_data(ttl=60)
@@ -42,11 +37,8 @@ def save_watchlist(watchlist):
 def load_watchlist():
     if os.path.exists(WATCHLIST_FILE):
         with open(WATCHLIST_FILE, "r") as f:
-            try:
-                data = json.load(f)
-                return data
-            except json.JSONDecodeError:
-                return []
+            try: return json.load(f)
+            except: return []
     return []
 
 # ---------- CALCULATIONS ----------
@@ -55,16 +47,13 @@ def calculate_flips(prices, volumes, names, limits):
     for item_id, data in prices.items():
         item_id = int(item_id)
         high, low = data.get("high"), data.get("low")
-        if not high or not low or low <= 0:
-            continue
+        if not high or not low or low <= 0: continue
         vol_data = volumes.get(str(item_id), {})
         volume = vol_data.get("highPriceVolume",0) + vol_data.get("lowPriceVolume",0)
-        if volume < MIN_VOLUME:
-            continue
+        if volume < MIN_VOLUME: continue
         real_sell = high * (1 - GE_TAX)
         real_margin = real_sell - low
-        if real_margin < MIN_MARGIN:
-            continue
+        if real_margin < MIN_MARGIN: continue
         roi = real_margin / low
         buy_limit = limits.get(item_id, 0)
         profit_per_limit = real_margin * buy_limit
@@ -90,64 +79,34 @@ def calculate_flips(prices, volumes, names, limits):
         })
     return pd.DataFrame(rows).sort_values(by="Profit per Hour", ascending=False).head(20)
 
-# ---------- DISPLAY ----------
-def render_table_with_add_buttons(df, table_key):
+# ---------- UI TABLE WITH ADD BUTTONS ----------
+def render_table_with_add(df, table_key):
     df = df.copy()
-    # Add icon HTML
+    if df.empty: 
+        st.write("No trades found.")
+        return
     df["Image"] = df["Image"].apply(lambda url: f'<img src="{url}" width="20" style="vertical-align:middle">')
-
-    # Add empty Add button column placeholder, will be replaced by buttons below
-    df["Add"] = ""
-
-    # Rearrange columns to put Image first, Add last
-    cols = df.columns.tolist()
-    cols.insert(0, cols.pop(cols.index("Image")))
-    cols.append(cols.pop(cols.index("Add")))
-    df = df[cols]
-
-    # Render base table HTML without the Add column content
-    base_html = df.drop(columns=["Add"]).to_html(escape=False, index=False)
-
-    # Build buttons HTML for Add column
-    buttons_html = ""
-    for idx in range(len(df)):
-        button_id = f"{table_key}_add_{idx}"
-        # Buttons must be outside html, so will create empty column here and add Streamlit buttons below
-        buttons_html += f'<td><button id="{button_id}">Add</button></td>'
-
-    # Inject buttons column into the table html manually by replacing the </tr> tags
-    # We do this by splitting table rows and inserting buttons per row
-    rows_html = base_html.split("</tr>")
-    # The first row is headers - add <th>Add</th> header
-    header = rows_html[0].replace("</tr>", "<th>Add</th></tr>")
-    new_rows_html = [header]
-
-    # For each data row, append the corresponding button html
-    for i, row_html in enumerate(rows_html[1:-1]):
-        new_row = row_html + buttons_html.split("</td>")[i] + "</td></tr>"
-        new_rows_html.append(new_row)
-
-    new_rows_html.append(rows_html[-1])  # closing tags
-
-    final_html = "".join(new_rows_html)
-
-    st.markdown(final_html, unsafe_allow_html=True)
-
-    # Now add actual Streamlit buttons aligned with rows below the table for interaction
     for idx, row in df.iterrows():
-        col1, col2, col3 = st.columns([0.9, 8, 1])
-        with col3:
-            button_label = f"Add '{row['Item']}'"
-            button_key = f"{table_key}_btn_{idx}"
-            if st.button(button_label, key=button_key):
-                if "watchlist" not in st.session_state:
-                    st.session_state.watchlist = load_watchlist()
-                # Avoid duplicates by Item name
+        cols = st.columns([0.1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 0.5])
+        with cols[0]: st.markdown(row["Image"], unsafe_allow_html=True)
+        with cols[1]: st.write(row["Item"])
+        with cols[2]: st.write(row["Buy"])
+        with cols[3]: st.write(row["Sell"])
+        with cols[4]: st.write(row["Margin"])
+        with cols[5]: st.write(row["ROI %"])
+        with cols[6]: st.write(row["Volume"])
+        with cols[7]: st.write(row["Buy Limit"])
+        with cols[8]: st.write(row["Profit per Limit"])
+        with cols[9]: st.write(row["Profit per Hour"])
+        with cols[10]:
+            if st.button("➕", key=f"{table_key}_{idx}"):
+                if "watchlist" not in st.session_state: st.session_state.watchlist = load_watchlist()
                 if row["Item"] not in [w["Item"] for w in st.session_state.watchlist]:
-                    st.session_state.watchlist.append(row.drop(labels=["Add"]).to_dict())
+                    st.session_state.watchlist.append(row.to_dict())
                     save_watchlist(st.session_state.watchlist)
                 st.experimental_rerun()
 
+# ---------- WATCHLIST ----------
 def render_watchlist():
     st.sidebar.header("👁️ Watchlist")
     watchlist = st.session_state.get("watchlist", load_watchlist())
@@ -156,38 +115,44 @@ def render_watchlist():
         return
     df_watchlist = pd.DataFrame(watchlist)
     df_watchlist["Image"] = df_watchlist["Image"].apply(lambda url: f'<img src="{url}" width="20" style="vertical-align:middle">')
-    cols = df_watchlist.columns.tolist()
-    cols.insert(0, cols.pop(cols.index("Image")))
-    df_watchlist = df_watchlist[cols]
-
-    # Render watchlist table HTML
-    html = df_watchlist.to_html(escape=False, index=False)
-
-    # Display the table
-    st.sidebar.markdown(html, unsafe_allow_html=True)
-
-    # Render Remove buttons aligned with rows
     for idx, row in df_watchlist.iterrows():
-        btn_key = f"remove_btn_{idx}"
-        if st.sidebar.button(f"❌ Remove '{row['Item']}'", key=btn_key):
-            st.session_state.watchlist.pop(idx)
-            save_watchlist(st.session_state.watchlist)
-            st.experimental_rerun()
+        cols = st.sidebar.columns([0.1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 0.5])
+        with cols[0]: st.markdown(row["Image"], unsafe_allow_html=True)
+        with cols[1]: st.write(row["Item"])
+        with cols[2]: st.write(row["Buy"])
+        with cols[3]: st.write(row["Sell"])
+        with cols[4]: st.write(row["Margin"])
+        with cols[5]: st.write(row["ROI %"])
+        with cols[6]: st.write(row["Volume"])
+        with cols[7]: st.write(row["Buy Limit"])
+        with cols[8]: st.write(row["Profit per Limit"])
+        with cols[9]: st.write(row["Profit per Hour"])
+        with cols[10]:
+            if st.button("❌", key=f"remove_{idx}"):
+                st.session_state.watchlist.pop(idx)
+                save_watchlist(st.session_state.watchlist)
+                st.experimental_rerun()
 
 # ---------- MAIN ----------
-st.set_page_config(page_title="OSRS GE Dashboard with Watchlist Buttons", layout="wide")
-st.title("📊 OSRS GE Dashboard with Watchlist Buttons")
+st.set_page_config(page_title="OSRS GE Dashboard", layout="wide")
+st.title("📊 OSRS GE Dashboard")
 
 prices, volumes, names, limits = fetch_data()
+if "watchlist" not in st.session_state: st.session_state.watchlist = load_watchlist()
 
-if "watchlist" not in st.session_state:
-    st.session_state.watchlist = load_watchlist()
-
+# Example tables: Regular, High Volume, Speculative
 st.subheader("💰 Regular Profitable Trades")
 regular_df = calculate_flips(prices, volumes, names, limits)
-if regular_df.empty:
-    st.write("No regular trades found.")
-else:
-    render_table_with_add_buttons(regular_df, "regular")
+render_table_with_add(regular_df, "regular")
+
+# Placeholder for High Volume table
+st.subheader("🟢 High Volume Flips")
+high_vol_df = regular_df.sort_values("Volume", ascending=False).head(20)
+render_table_with_add(high_vol_df, "highvol")
+
+# Placeholder for Speculative / Underpriced table
+st.subheader("🔵 Speculative Trades")
+speculative_df = regular_df.sort_values("Confidence", ascending=False).head(20)
+render_table_with_add(speculative_df, "speculative")
 
 render_watchlist()
