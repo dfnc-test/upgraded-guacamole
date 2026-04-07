@@ -1,7 +1,6 @@
 import streamlit as st
 import requests
 import pandas as pd
-import numpy as np
 
 # ---------- CONFIG ----------
 LATEST_URL = "https://prices.runescape.wiki/api/v1/osrs/latest"
@@ -9,8 +8,6 @@ VOLUME_URL = "https://prices.runescape.wiki/api/v1/osrs/24h"
 MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping"
 HEADERS = {"User-Agent": "osrs-ge-dashboard (redsnowcp@gmail.com)"}
 
-STOP_LOSS_PCT = 0.03
-TAKE_PROFIT_PCT = 0.05
 GE_TAX = 0.05
 HIGH_VALUE_THRESHOLD = 1_000_000
 MIN_VOLUME = 500
@@ -37,6 +34,7 @@ def fetch_data():
     id_to_type = {item["id"]: item.get("type", "") for item in mapping}
     return prices, volumes, id_to_name, id_to_limit, id_to_type
 
+# ---------- CALCULATIONS ----------
 def calculate_flips(prices, volumes, names, limits):
     rows = []
     for item_id, data in prices.items():
@@ -58,12 +56,12 @@ def calculate_flips(prices, volumes, names, limits):
         fills_per_hour = volume / 24
         time_to_sell_hours = min(buy_limit / fills_per_hour, BUY_LIMIT_HOURS) if fills_per_hour>0 else 0.1
         profit_per_hour = profit_per_limit / max(time_to_sell_hours,0.1)
-        # Confidence score
         volume_score = min(volume / 100_000, 1)
         margin_score = min(real_margin / 1000, 1)
         roi_score = min(roi / 0.1, 1)
         confidence_score = round((volume_score + margin_score + roi_score)/3*100,1)
         rows.append({
+            "Image": get_image_url(names.get(item_id,"Unknown")),
             "Item": names.get(item_id,"Unknown"),
             "Buy": low,
             "Sell": int(real_sell),
@@ -77,7 +75,7 @@ def calculate_flips(prices, volumes, names, limits):
         })
     return pd.DataFrame(rows).sort_values(by="Profit per Hour", ascending=False).head(20)
 
-def high_volume_flips(prices, volumes, names, types, min_volume=2000, max_margin=50):
+def high_volume_flips(prices, volumes, names, types):
     rows=[]
     for item_id, data in prices.items():
         item_id=int(item_id)
@@ -85,13 +83,15 @@ def high_volume_flips(prices, volumes, names, types, min_volume=2000, max_margin
         if not high or not low or low<=0: continue
         vol_data = volumes.get(str(item_id),{})
         volume = vol_data.get("highPriceVolume",0)+vol_data.get("lowPriceVolume",0)
-        if volume<min_volume: continue
+        if volume<2000: continue
         margin=high-low
-        if margin>max_margin: continue
+        if margin>50: continue
         rows.append({
+            "Image": get_image_url(names.get(item_id,"Unknown")),
             "Item": names.get(item_id,"Unknown"),
             "Buy": low,
             "Sell": high,
+            "Max Price": high,  # Could also track historical high if cached
             "Margin": int(margin),
             "Volume": volume,
             "Type": types.get(item_id,"")
@@ -115,6 +115,7 @@ def speculative_trades(prices, volumes, names):
         roi_score = min(roi/0.1,1)
         confidence_score = round((volume_score + margin_score + roi_score)/3*100,1)
         rows.append({
+            "Image": get_image_url(names.get(item_id,"Unknown")),
             "Item": names.get(item_id,"Unknown"),
             "Buy": low,
             "Sell": high,
@@ -126,31 +127,40 @@ def speculative_trades(prices, volumes, names):
     return pd.DataFrame(rows).sort_values(by="Confidence", ascending=False).head(20)
 
 # ---------- UI ----------
-st.set_page_config(page_title="OSRS GE Dashboard v4", layout="wide")
-st.title("📊 OSRS GE Dashboard v4")
+st.set_page_config(page_title="OSRS GE Dashboard v5", layout="wide")
+st.title("📊 OSRS GE Dashboard v5")
 
 prices, volumes, names, limits, types = fetch_data()
 
-# Regular flips table
+# Helper function to render tables with images
+def display_table_with_images(df):
+    for _, row in df.iterrows():
+        cols = st.columns([0.5, 2])
+        with cols[0]:
+            st.image(row["Image"], width=40)
+        with cols[1]:
+            st.write({k: v for k,v in row.items() if k!="Image"})
+
+# Regular flips
 st.subheader("💰 Regular Profitable Trades")
 regular_df = calculate_flips(prices, volumes, names, limits)
 if regular_df.empty:
     st.write("No regular trades found.")
 else:
-    st.dataframe(regular_df.reset_index(drop=True), use_container_width=True)
+    display_table_with_images(regular_df)
 
-# High volume / low margin table
+# High volume flips
 st.subheader("⚡ High Volume / Low Margin Flips")
 high_vol_df = high_volume_flips(prices, volumes, names, types)
 if high_vol_df.empty:
     st.write("No high-volume flips found.")
 else:
-    st.dataframe(high_vol_df.reset_index(drop=True), use_container_width=True)
+    display_table_with_images(high_vol_df)
 
-# Speculative trades table
+# Speculative trades
 st.subheader("🔮 Speculative / Underpriced Trades")
 spec_df = speculative_trades(prices, volumes, names)
 if spec_df.empty:
     st.write("No speculative trades found.")
 else:
-    st.dataframe(spec_df.reset_index(drop=True), use_container_width=True)
+    display_table_with_images(spec_df)
