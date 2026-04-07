@@ -70,6 +70,13 @@ def calculate_flips(prices, volumes, names, limits, min_margin=MIN_MARGIN, min_v
         fills_per_hour = volume / 24
         time_to_sell_hours = min(buy_limit / fills_per_hour, BUY_LIMIT_HOURS) if fills_per_hour>0 else 0.1
         profit_per_hour = profit_per_limit / max(time_to_sell_hours,0.1)
+
+        # Confidence score based on volume, margin, ROI
+        volume_score = min(volume / 100_000, 1)
+        margin_score = min(real_margin / 1000, 1)
+        roi_score = min(roi / 0.1, 1)
+        confidence = round((volume_score + margin_score + roi_score)/3*100,1)
+
         rows.append({
             "Image": get_image_url(names.get(item_id,"Unknown")),
             "Item": names.get(item_id,"Unknown"),
@@ -80,15 +87,16 @@ def calculate_flips(prices, volumes, names, limits, min_margin=MIN_MARGIN, min_v
             "Volume": volume,
             "Buy Limit": buy_limit,
             "Profit per Limit": int(profit_per_limit),
-            "Profit per Hour": int(profit_per_hour)
+            "Profit per Hour": int(profit_per_hour),
+            "Confidence": confidence
         })
     return pd.DataFrame(rows)
 
 # ---------- DISPLAY ----------
 def render_table(df, table_key):
     df = df.copy()
-    headers = ["Img","Item","Buy","Sell","Margin","ROI %","Volume","Buy Limit","Profit/Limit","Profit/Hr","Add"]
-    col_widths = [0.5,2,1,1,1,1,1,1,1,1,0.3]
+    headers = ["Img","Item","Buy","Sell","Margin","ROI %","Volume","Buy Limit","Profit/Limit","Profit/Hr","Conf","Add"]
+    col_widths = [0.5,2,1,1,1,1,1,1,1,1,1,0.3]
     st.write("")
     header_cols = st.columns(col_widths)
     for col, header in zip(header_cols, headers):
@@ -106,7 +114,10 @@ def render_table(df, table_key):
         cols[7].markdown(f"{row['Buy Limit']}", unsafe_allow_html=True)
         cols[8].markdown(f"{row['Profit per Limit']}", unsafe_allow_html=True)
         cols[9].markdown(f"{row['Profit per Hour']}", unsafe_allow_html=True)
-        if cols[10].button("+", key=f"{table_key}_{idx}"):
+        # Confidence coloring: green for high, red for low
+        conf_color = "green" if row['Confidence'] > 70 else "orange" if row['Confidence']>40 else "red"
+        cols[10].markdown(f"<span style='color:{conf_color}'>{row['Confidence']}</span>", unsafe_allow_html=True)
+        if cols[11].button("+", key=f"{table_key}_{idx}"):
             if "watchlist" not in st.session_state:
                 st.session_state.watchlist = load_watchlist()
             if row["Item"] not in [w["Item"] for w in st.session_state.watchlist]:
@@ -138,7 +149,6 @@ def render_watchlist():
                         Volume: {row['Volume']}
                     </div>
                     <div style="margin-left:auto;">
-                        <form>{""}</form>
                     </div>
                 </div>
             </div>
@@ -148,9 +158,22 @@ def render_watchlist():
             st.session_state.watchlist.pop(idx)
             save_watchlist(st.session_state.watchlist)
 
+# ---------- AI / Momentum Suggestions ----------
+def suggest_ai_trades(df):
+    suggestions = []
+    for _, row in df.iterrows():
+        # Simple heuristic: high volume spike or sudden margin jump
+        if row["Volume"] > 5000 and row["Margin"] > 50:
+            suggestions.append(row)
+    if not suggestions:
+        st.info("No AI-based suggestions at this time.")
+        return
+    st.subheader("🤖 AI / Momentum Suggested Trades")
+    render_table(pd.DataFrame(suggestions).sort_values(by="Profit per Hour", ascending=False).head(20), "ai_suggested")
+
 # ---------- MAIN ----------
-st.set_page_config(page_title="OSRS GE Dashboard", layout="wide")
-st.title("📊 OSRS GE Dashboard")
+st.set_page_config(page_title="OSRS GE Dashboard AI", layout="wide")
+st.title("📊 OSRS GE Dashboard with AI Suggestions")
 
 prices, volumes, names, limits = fetch_data()
 if "watchlist" not in st.session_state:
@@ -172,14 +195,17 @@ if highvol_df.empty:
 else:
     render_table(highvol_df.sort_values(by="Volume", ascending=False).head(20), "highvol")
 
-# Speculative trades (low price items that may be underpriced)
+# Speculative trades
 st.subheader("🔮 Speculative Trades")
 spec_df = calculate_flips(prices, volumes, names, limits, min_margin=5, min_volume=50)
-spec_df = spec_df[spec_df["ROI %"] > 0]  # filter profitable speculative trades
+spec_df = spec_df[spec_df["ROI %"] > 0]
 if spec_df.empty:
     st.write("No speculative trades found.")
 else:
     render_table(spec_df.sort_values(by="ROI %", ascending=False).head(20), "spec")
 
-# Render watchlist
+# AI / Momentum based suggestions
+suggest_ai_trades(pd.concat([regular_df, highvol_df, spec_df]))
+
+# Watchlist
 render_watchlist()
