@@ -87,7 +87,7 @@ if hist is not None and len(hist) >= 3:
     hist_mean = hist[-7:].mean()  # last 7 days
     hist_std = hist[-7:].std(ddof=0)
     z = (mid_price - hist_mean) / hist_std if hist_std > 0 else 0.0
-        debug_df = pd.DataFrame({
+    debug_df = pd.DataFrame({
             "Timestamp": hist.index,
             "MidPrice": hist.values
         })
