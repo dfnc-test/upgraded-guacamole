@@ -105,23 +105,15 @@ def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
 
         # ----- Z-SCORE using historical mid-prices -----
         hist = fetch_history(item_id)
-        if hist is not None and len(hist) >= 7:  # ensure enough history
+        if hist is not None and len(hist) >= 3:  # require at least 3 days
             hist_mean = hist.mean()
             hist_std = hist.std(ddof=0)
             if hist_std > 0:
                 z = (mid_price - hist_mean) / hist_std
             else:
-                z = 0  # flat price history
+                z = 0.0  # flat history, price = mean
         else:
-            z = np.nan  # not enough data
-
-        # Signal
-        if z < -0.5 and vol_spike > 1:
-            signal = "BUY"
-        elif z > 0.5:
-            signal = "SELL"
-        else:
-            signal = "HOLD"
+            z = 0.0  # fallback when no history
 
         # Confidence
         volume_score = min(volume / 100_000, 1)
