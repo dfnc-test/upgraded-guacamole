@@ -60,48 +60,48 @@ def simulate_portfolio(items, model_name, days, start_gp=START_GP):
     portfolio = {"cash": start_gp, "holdings": {}}
     timeline = []
 
-    for t in range(days):
-        # compute current item prices at this timestep
-        for item_id, hist in items.items():
-            if t >= len(hist):
-                continue
-            current_price = hist.iloc[t]
+    # Safe backtest loop
+for t in range(days):
+    buy_candidates = []
+    for item_id, hist in items.items():
+        if t >= len(hist):
+            continue
+        current_price = hist.iloc[t]
 
-            # compute indicators
-            hist_slice = hist[:t+1]
-            hist_mean = hist_slice.mean()
-            hist_std = hist_slice.std(ddof=0) if hist_slice.std(ddof=0)>0 else 1
-            z = (current_price - hist_mean)/hist_std
-            margin = current_price - hist_slice.iloc[-2] if t>0 else 0
-            roi = margin / hist_slice.iloc[-2] if t>0 else 0
-            vol_spike = 1  # placeholder
+        if t < 1 or len(hist[:t+1]) < 2:
+            margin = 0
+            roi = 0
+        else:
+            prev_price = hist.iloc[t-1]
+            margin = current_price - prev_price
+            roi = margin / prev_price if prev_price != 0 else 0
 
-            # model decision
-            buy = False
-            sell = False
-            if model_name == "Z-score":
-                if z < -0.5: buy = True
-                if z > 0.5: sell = True
-            elif model_name == "High Margin":
-                if margin > 20: buy = True
-                if roi > 0.1: sell = True
-            elif model_name == "Combined":
-                score = z + roi + margin/50
-                if score > 0.5: buy = True
-                if score < -0.5: sell = True
+        hist_slice = hist[:t+1]
+        hist_mean = hist_slice.mean()
+        hist_std = hist_slice.std(ddof=0) if hist_slice.std(ddof=0) > 0 else 1
+        z = (current_price - hist_mean) / hist_std
 
-            # execute sell
-            if item_id in portfolio["holdings"] and sell:
-                qty = portfolio["holdings"].pop(item_id)
-                portfolio["cash"] += qty * current_price * (1-GE_TAX)
+        buy = False
+        sell = False
+        if model_name == "Z-score":
+            if z < -0.5: buy = True
+            if z > 0.5: sell = True
+        elif model_name == "High Margin":
+            if margin > 20: buy = True
+            if roi > 0.1: sell = True
+        elif model_name == "Combined":
+            score = z + roi + margin/50
+            if score > 0.5: buy = True
+            if score < -0.5: sell = True
 
-            # execute buy
-            if buy and portfolio["cash"] > 1000:
-                max_affordable = int(portfolio["cash"] / current_price)
-                if max_affordable > 0:
-                    qty = min(max_affordable, 100)  # limit per trade
-                    portfolio["holdings"][item_id] = portfolio["holdings"].get(item_id,0)+qty
-                    portfolio["cash"] -= qty * current_price
+        # prioritize sell first
+        if item_id in portfolio["holdings"] and sell:
+            qty = portfolio["holdings"].pop(item_id)
+            portfolio["cash"] += qty * current_price * (1-GE_TAX)
+
+        # queue buy candidates
+        if buy:
+            buy_candidates.append((item_id, current_price))
 
         # record total value
         total_value = portfolio["cash"]
