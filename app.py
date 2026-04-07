@@ -2,47 +2,31 @@ import streamlit as st
 import requests
 import pandas as pd
 
+# ---------- CONFIG ----------
 LATEST_URL = "https://prices.runescape.wiki/api/v1/osrs/latest"
 VOLUME_URL = "https://prices.runescape.wiki/api/v1/osrs/24h"
 MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping"
 
-# ✅ IMPORTANT: Use a REAL identifiable agent
 HEADERS = {
-    "User-Agent": "osrs-ge-dashboard (redsnow360@gmail.com)"
+    "User-Agent": "osrs-ge-dashboard (youremail@gmail.com)"
 }
 
+MIN_VOLUME = 1000
+MIN_MARGIN = 20
+
+# ---------- FETCH ----------
 @st.cache_data(ttl=60)
 def fetch_data():
-    try:
-        prices_res = requests.get(LATEST_URL, headers=HEADERS, timeout=10)
-        volumes_res = requests.get(VOLUME_URL, headers=HEADERS, timeout=10)
-        mapping_res = requests.get(MAPPING_URL, headers=HEADERS, timeout=10)
+    prices = requests.get(LATEST_URL, headers=HEADERS, timeout=10).json()["data"]
+    volumes = requests.get(VOLUME_URL, headers=HEADERS, timeout=10).json()["data"]
+    mapping = requests.get(MAPPING_URL, headers=HEADERS, timeout=10).json()
 
-        st.write("Status:", prices_res.status_code, volumes_res.status_code)
+    id_to_name = {item["id"]: item["name"] for item in mapping}
 
-        if prices_res.status_code != 200:
-            st.error("Price API blocked")
-            st.text(prices_res.text[:300])
-            return {}, {}, {}
-
-        if volumes_res.status_code != 200:
-            st.error("Volume API blocked")
-            st.text(volumes_res.text[:300])
-            return {}, {}, {}
-
-        prices = prices_res.json().get("data", {})
-        volumes = volumes_res.json().get("data", {})
-        mapping = mapping_res.json()
-
-        id_to_name = {item["id"]: item["name"] for item in mapping}
-
-        return prices, volumes, id_to_name
-
-    except Exception as e:
-        st.error(f"Fetch error: {e}")
-        return {}, {}, {}
+    return prices, volumes, id_to_name
 
 
+# ---------- ANALYZE ----------
 def analyze_items(prices, volumes, names):
     rows = []
 
@@ -52,7 +36,7 @@ def analyze_items(prices, volumes, names):
         high = data.get("high")
         low = data.get("low")
 
-        if not high or not low:
+        if not high or not low or low <= 0:
             continue
 
         vol_data = volumes.get(str(item_id), {})
@@ -61,14 +45,22 @@ def analyze_items(prices, volumes, names):
             vol_data.get("lowPriceVolume", 0)
         )
 
-        if volume <= 0:
+        if volume < MIN_VOLUME:
             continue
+
+        margin = high - low
+
+        if margin < MIN_MARGIN:
+            continue
+
+        roi = margin / low
 
         rows.append({
             "Item": names.get(item_id, "Unknown"),
             "Buy": low,
             "Sell": high,
-            "Margin": high - low,
+            "Margin": margin,
+            "ROI %": round(roi * 100, 2),
             "Volume": volume
         })
 
@@ -77,19 +69,21 @@ def analyze_items(prices, volumes, names):
     if df.empty:
         return df
 
-    return df.sort_values(by="Volume", ascending=False).head(20)
+    # ✅ Sort by best opportunities
+    df["Score"] = df["Margin"] * df["Volume"]
+    df = df.sort_values(by="Score", ascending=False)
+
+    return df.head(20)
 
 
-st.title("📊 OSRS GE Dashboard")
+# ---------- UI ----------
+st.set_page_config(page_title="OSRS GE Dashboard", layout="centered")
+st.title("📊 OSRS GE Trading Dashboard")
 
 prices, volumes, names = fetch_data()
+df = analyze_items(prices, volumes, names)
 
-if prices and volumes:
-    df = analyze_items(prices, volumes, names)
-
-    if df.empty:
-        st.warning("No items found")
-    else:
-        st.dataframe(df)
+if df.empty:
+    st.warning("No trades found — try lowering filters")
 else:
-    st.error("API is blocked (403). Fix User-Agent.")
+    st.dataframe(df)
