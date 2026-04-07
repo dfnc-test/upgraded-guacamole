@@ -10,6 +10,7 @@ import random
 LATEST_URL = "https://prices.runescape.wiki/api/v1/osrs/latest"
 VOLUME_URL = "https://prices.runescape.wiki/api/v1/osrs/24h"
 MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping"
+
 HEADERS = {"User-Agent": "osrs-ge-dashboard (redsnowcp@gmail.com)"}
 
 GE_TAX = 0.05
@@ -37,33 +38,26 @@ def fetch_data():
 def fetch_history(item_id):
     """Fetch historical midpoint prices for Z-score"""
     try:
-        url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?id={item_id}&timestep=1d"
+        url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?id={item_id}&timestep=1h"
         res = requests.get(url, headers=HEADERS, timeout=10).json()
-        data = res.get("data", {}).get(str(item_id), [])
-
-        if not isinstance(data, list):
+        data = res.get("data", [])
+        if not isinstance(data, list) or len(data) == 0:
             return None
 
         prices = []
-        timestamps = []
         for point in data:
             high = point.get("avgHighPrice", 0)
-            low = point.get("avgLowPrice", 0)
-            if high > 0 and low > 0:
-                prices.append((high + low)/2)
-            elif high > 0:
+            low = point.get("avgLowPrice")
+            if high and low is not None:
+                prices.append((high + low) / 2)
+            elif high:
                 prices.append(high)
-            elif low > 0:
-                prices.append(low)
-            else:
-                continue
-            timestamps.append(point.get("timestamp"))
 
         if len(prices) < 3:
             return None
-        return pd.Series(prices, index=timestamps)
+        return pd.Series(prices)
     except Exception as e:
-        print(f"Error fetching history for {item_id}: {e}")
+        st.write(f"Error fetching history for {item_id}: {e}")
         return None
 
 def save_watchlist(watchlist):
@@ -79,35 +73,7 @@ def load_watchlist():
                 return []
     return []
 
-# ---------- MAIN ----------
-st.set_page_config(layout="wide")
-st.title("📊 OSRS GE Dashboard with Fixed Z-Scores")
-
-# Fetch GE data
-prices, volumes, names, limits = fetch_data()
-
-# ---------- DEBUG Z-SCORE ----------
-st.subheader("🛠️ Debug Z-Score for Random Item")
-random_item_id = random.choice(list(prices.keys()))
-random_item_data = prices[random_item_id]
-high, low = random_item_data.get("high"), random_item_data.get("low")
-mid_price = (high + low)/2 if high and low else None
-
-if mid_price:
-    hist = fetch_history(int(random_item_id))
-    if hist is not None:
-        hist_mean = hist.mean()
-        hist_std = hist.std(ddof=0)
-        z = (mid_price - hist_mean)/hist_std if hist_std > 0 else 0
-        st.write(f"Random Item {random_item_id} - {names.get(int(random_item_id),'Unknown')}")
-        st.write(f"Mid Price: {mid_price}, Historical Mean: {hist_mean:.2f}, Std: {hist_std:.2f}, Z-score: {z:.2f}")
-        st.dataframe(pd.DataFrame({"Timestamp": hist.index, "MidPrice": hist.values}))
-    else:
-        st.write(f"No historical data returned for item {random_item_id}")
-else:
-    st.write(f"Random item {random_item_id} has invalid high/low prices")
-
-# ---------- FLIPS CALCULATION ----------
+# ---------- CALCULATIONS ----------
 def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
     rows = []
     for item_id, data in prices.items():
@@ -121,34 +87,34 @@ def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
         if volume < min_vol:
             continue
 
-        real_sell = high*(1-GE_TAX)
+        real_sell = high * (1 - GE_TAX)
         margin = real_sell - low
         if margin < MIN_MARGIN:
             continue
 
-        roi = margin/low
+        roi = margin / low
         buy_limit = limits.get(item_id, 0)
-        profit_limit = margin*buy_limit
-        fills_per_hour = volume/24
-        time_to_sell = min(buy_limit/fills_per_hour, BUY_LIMIT_HOURS) if fills_per_hour>0 else 0.1
-        profit_hour = profit_limit / max(time_to_sell,0.1)
+        profit_limit = margin * buy_limit
+        fills_per_hour = volume / 24
+        time_to_sell = min(buy_limit / fills_per_hour, BUY_LIMIT_HOURS) if fills_per_hour>0 else 0.1
+        profit_hour = profit_limit / max(time_to_sell, 0.1)
 
-        mid_price = (high+low)/2
+        mid_price = (high + low)/2
         sma = mid_price
         ema = (mid_price*0.7 + low*0.3)
         momentum = ((high-low)/low)*100 if low>0 else 0
         vol_spike = min(volume/10000,5)
 
-        # ----- Z-SCORE -----
+        # ----- Z-SCORE using historical mid-prices -----
         hist = fetch_history(item_id)
         if hist is not None and len(hist) >= 3:
             hist_mean = hist.mean()
             hist_std = hist.std(ddof=0)
-            z = (mid_price - hist_mean)/hist_std if hist_std > 0 else 0
+            z = (mid_price - hist_mean) / hist_std if hist_std > 0 else 0.0
         else:
-            z = 0
+            z = 0.0
 
-        # Signal
+        # ----- Signal based on Z-score -----
         if z < -0.5 and vol_spike > 1:
             signal = "BUY"
         elif z > 0.5:
@@ -156,7 +122,6 @@ def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
         else:
             signal = "HOLD"
 
-        # Confidence
         volume_score = min(volume / 100_000, 1)
         margin_score = min(margin / 1000, 1)
         roi_score = min(roi / 0.1, 1)
@@ -175,7 +140,7 @@ def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
             "SMA": int(sma),
             "EMA": int(ema),
             "Momentum": round(momentum,2),
-            "Z": round(z,2),
+            "Z": round(z,2) if not np.isnan(z) else "N/A",
             "Vol Spike": round(vol_spike,2),
             "Signal": signal
         })
@@ -183,11 +148,14 @@ def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
 
 # ---------- DISPLAY ----------
 def render_table(df, key):
-    headers = ["Img","Item","Buy","Sell","Margin","ROI","Vol","P/H","Conf","SMA","EMA","Mom","Z","Spike","Signal","+"]
+    headers = ["Img","Item","Buy","Sell","Margin","ROI","Vol","P/H","Conf",
+               "SMA","EMA","Mom","Z","Spike","Signal","+"]
     widths = [0.5,2,1,1,1,1,1,1,1,1,1,1,1,1,1,0.4]
+
     cols = st.columns(widths)
     for c,h in zip(cols, headers):
         c.markdown(f"**{h}**")
+
     for i,row in df.iterrows():
         cols = st.columns(widths)
         cols[0].markdown(f'<img src="{row["Image"]}" width="25">', unsafe_allow_html=True)
@@ -207,6 +175,7 @@ def render_table(df, key):
         cols[12].markdown(row["Z"], unsafe_allow_html=True)
         cols[13].markdown(row["Vol Spike"])
         cols[14].markdown(f"<span style='color:{zcolor}'>{row['Signal']}</span>", unsafe_allow_html=True)
+
         if cols[15].button("+", key=f"{key}_{i}"):
             if "watchlist" not in st.session_state:
                 st.session_state.watchlist = load_watchlist()
@@ -238,7 +207,32 @@ def render_watchlist():
             wl.pop(i)
             save_watchlist(wl)
 
-# ---------- DASHBOARD ----------
+# ---------- MAIN ----------
+st.set_page_config(layout="wide")
+st.title("📊 OSRS GE Dashboard (High Volume Test)")
+
+prices, volumes, names, limits = fetch_data()
+
+# ----- Debug Random Item -----
+st.subheader("🛠️ Debug Z-Score for Random Item")
+random_item_id = random.choice(list(prices.keys()))
+random_item_data = prices[random_item_id]
+high, low = random_item_data.get("high"), random_item_data.get("low")
+mid_price = (high + low) / 2 if high and low else None
+
+if mid_price:
+    hist = fetch_history(int(random_item_id))
+    if hist is not None:
+        z = (mid_price - hist.mean()) / hist.std(ddof=0) if hist.std(ddof=0) > 0 else 0.0
+        st.write(f"Random Item: {random_item_id} - {high}/{low} (Mid={mid_price})")
+        st.write(f"Historical Mean: {hist.mean():.2f}, Std: {hist.std(ddof=0):.2f}, Z-score: {z:.2f}")
+        st.dataframe(pd.DataFrame({"MidPrice": hist.values}))
+    else:
+        st.write(f"No historical data returned for item {random_item_id}")
+else:
+    st.write(f"Random item {random_item_id} has invalid high/low prices.")
+
+# ----- Dashboard Tables -----
 st.subheader("💰 Regular Profitable Trades")
 df = calculate_flips(prices, volumes, names, limits)
 render_table(df, "main")
