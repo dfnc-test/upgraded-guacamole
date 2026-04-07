@@ -56,6 +56,7 @@ def analyze_items(prices, volumes, names, capital, mode):
         max_fill_time = 6
 
     for item_id, data in prices.items():
+        
         item_id = int(item_id)
 
         high = data.get("high")
@@ -63,7 +64,7 @@ def analyze_items(prices, volumes, names, capital, mode):
 
         # ✅ FIXED volume handling
         vol_data = volumes.get(str(item_id), {})
-        vol = vol_data.get("volume", 0) or vol_data.get("high", 0)
+        vol = vol_data.get("volume", 0)
 
         if not high or not low or low == 0:
             continue
@@ -78,8 +79,8 @@ def analyze_items(prices, volumes, names, capital, mode):
             continue
 
         # Simulate realistic execution
-        real_buy = int(low * 1.01)
-        real_sell = int(high * 0.99)
+        real_buy = int(low * 1.002)   # 0.2%
+        real_sell = int(high * 0.998)
         real_margin = real_sell - real_buy
 
         if real_margin <= 0:
@@ -87,21 +88,18 @@ def analyze_items(prices, volumes, names, capital, mode):
 
         real_roi = real_margin / real_buy
 
-        if real_roi > max_real_roi:
-            continue
-
         # Fill-time estimate
         fills_per_hour = vol / 24
         if fills_per_hour == 0:
             continue
 
-        trade_size = min(capital // real_buy, int(vol * 0.1))
+        trade_size = min(capital // real_buy, int(vol * 0.2))    
         if trade_size == 0:
             continue
 
         time_to_fill = trade_size / fills_per_hour
 
-        if time_to_fill > max_fill_time:
+        if time_to_fill > max_fill_time * 2:
             continue
 
         name = names.get(item_id, "Unknown")
@@ -110,7 +108,7 @@ def analyze_items(prices, volumes, names, capital, mode):
         take_profit = int(real_buy * (1 + TAKE_PROFIT_PCT))
 
         liquidity_score = round((vol / max(time_to_fill, 0.1)) / 1000, 2)
-
+        st.write("DEBUG:", name, margin, real_margin, vol)
         rows.append({
             "Item": name,
             "Buy": real_buy,
