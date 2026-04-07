@@ -1,89 +1,77 @@
-import streamlit as st
-import requests
-import pandas as pd
-import numpy as np
-import json
-import os
-import random
+# ---------- CALCULATIONS ----------
+def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
+    rows = []
+    for item_id_str, data in prices.items():
+        item_id = int(item_id_str)
+        high, low = data.get("high"), data.get("low")
+        if not high or not low or low <= 0:
+            continue
 
-# ---------- CONFIG ----------
-LATEST_URL = "https://prices.runescape.wiki/api/v1/osrs/latest"
-VOLUME_URL = "https://prices.runescape.wiki/api/v1/osrs/24h"
-MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping"
+        vol_data = volumes.get(str(item_id), {})
+        volume = vol_data.get("highPriceVolume",0) + vol_data.get("lowPriceVolume",0)
+        if volume < min_vol:
+            continue
 
-HEADERS = {"User-Agent": "osrs-ge-dashboard (redsnowcp@gmail.com)"}
+        real_sell = high * (1 - GE_TAX)
+        margin = real_sell - low
+        if margin < MIN_MARGIN:
+            continue
 
-GE_TAX = 0.05
-MIN_VOLUME = 500
-HIGH_VOLUME_THRESHOLD = 50_000
-MIN_MARGIN = 20
-BUY_LIMIT_HOURS = 4
-WATCHLIST_FILE = "watchlist.json"
+        roi = margin / low
+        buy_limit = limits.get(item_id, 0)
+        profit_limit = margin * buy_limit
+        fills_per_hour = volume / 24
+        time_to_sell = min(buy_limit / fills_per_hour, BUY_LIMIT_HOURS) if fills_per_hour>0 else 0.1
+        profit_hour = profit_limit / max(time_to_sell, 0.1)
 
-# ---------- HELPERS ----------
-def get_image_url(name):
-    formatted = name.replace(" ", "_").replace("'", "").replace("(", "").replace(")", "")
-    return f"https://oldschool.runescape.wiki/images/{formatted}.png"
+        mid_price = (high + low)/2
+        sma = mid_price
+        ema = (mid_price*0.7 + low*0.3)
+        momentum = ((high-low)/low)*100 if low>0 else 0
+        vol_spike = min(volume/10000,5)
 
-@st.cache_data(ttl=60)
-def fetch_data():
-    prices = requests.get(LATEST_URL, headers=HEADERS, timeout=10).json()["data"]
-    volumes = requests.get(VOLUME_URL, headers=HEADERS, timeout=10).json()["data"]
-    mapping = requests.get(MAPPING_URL, headers=HEADERS, timeout=10).json()
-    id_to_name = {item["id"]: item["name"] for item in mapping}
-    id_to_limit = {item["id"]: item.get("limit", 0) for item in mapping}
-    return prices, volumes, id_to_name, id_to_limit
+        # ----- Z-SCORE using historical mid-prices -----
+        hist = fetch_history(item_id)
+        if hist is not None and len(hist) >= 3:
+            hist_mean = hist.mean()
+            hist_std = hist.std(ddof=0)
+            z = (mid_price - hist_mean) / hist_std if hist_std > 0 else 0.0
+        else:
+            z = "N/A"  # fallback if no history
 
-# ---------- HISTORICAL DATA ----------
-@st.cache_data(ttl=3600)
-def fetch_history(item_id, timeout=30):
-    """Fetch historical midpoint prices for Z-score calculation"""
-    try:
-        url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?id={item_id}&timestep=1h"
-        res = requests.get(url, headers=HEADERS, timeout=timeout).json()
-        data = res.get("data", [])
-        if not isinstance(data, list) or len(data) == 0:
-            st.write(f"No historical data returned for item {item_id}")
-            return None
+        # ----- Signal based on Z-score -----
+        if z != "N/A":
+            if z < -0.5 and vol_spike > 1:
+                signal = "BUY"
+            elif z > 0.5:
+                signal = "SELL"
+            else:
+                signal = "HOLD"
+        else:
+            signal = "HOLD"
 
-        prices = []
-        for point in data:
-            high = point.get("avgHighPrice", 0)
-            low = point.get("avgLowPrice")
-            if high and low is not None:
-                prices.append((high + low) / 2)
-            elif high:
-                prices.append(high)
+        # Confidence
+        volume_score = min(volume / 100_000, 1)
+        margin_score = min(margin / 1000, 1)
+        roi_score = min(roi / 0.1, 1)
+        confidence = round((volume_score + margin_score + roi_score)/3*100,1)
 
-        if len(prices) < 3:
-            return None
-        return pd.Series(prices)
-    except Exception as e:
-        st.write(f"Error fetching history for {item_id}: {e}")
-        return None
-
-# ---------- DEBUGGING Z-SCORE ----------
-st.subheader("🛠️ Debug Z-Score for Random Item")
-prices, volumes, names, limits = fetch_data()
-
-random_item_id = int(random.choice(list(prices.keys())))
-random_item_data = prices[str(random_item_id)]
-high, low = random_item_data.get("high"), random_item_data.get("low")
-mid_price = (high + low) / 2 if high and low else None
-
-if mid_price:
-    hist = fetch_history(random_item_id)
-    if hist is not None:
-        hist_mean = hist.mean()
-        hist_std = hist.std(ddof=0)
-        z = (mid_price - hist_mean) / hist_std if hist_std > 0 else 0.0
-        debug_df = pd.DataFrame({
-            "MidPrice": hist.values
+        rows.append({
+            "Image": get_image_url(names.get(item_id,"Unknown")),
+            "Item": names.get(item_id,"Unknown"),
+            "Buy": low,
+            "Sell": int(real_sell),
+            "Margin": int(margin),
+            "ROI %": round(roi*100,2),
+            "Volume": volume,
+            "Profit/Hr": int(profit_hour),
+            "Conf": confidence,
+            "SMA": int(sma),
+            "EMA": int(ema),
+            "Momentum": round(momentum,2),
+            "Z": round(z,2) if z != "N/A" else "N/A",
+            "Vol Spike": round(vol_spike,2),
+            "Signal": signal
         })
-        st.write(f"Random Item: {random_item_id} - {high}/{low} (Mid={mid_price})")
-        st.write(f"Historical Mean: {hist_mean:.2f}, Std: {hist_std:.2f}, Z-score: {z:.2f}")
-        st.dataframe(debug_df)
-    else:
-        st.write(f"No historical data returned for item {random_item_id}")
-else:
-    st.write(f"Random item {random_item_id} has invalid high/low prices.")
+
+    return pd.DataFrame(rows).sort_values(by="Profit/Hr", ascending=False).head(20)
