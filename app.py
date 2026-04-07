@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
+import numpy as np
 import json
 import os
 
@@ -8,6 +9,7 @@ import os
 LATEST_URL = "https://prices.runescape.wiki/api/v1/osrs/latest"
 VOLUME_URL = "https://prices.runescape.wiki/api/v1/osrs/24h"
 MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping"
+HISTORY_URL = "https://prices.runescape.wiki/api/v1/osrs/market/{item_id}/daily"
 HEADERS = {"User-Agent": "osrs-ge-dashboard (redsnowcp@gmail.com)"}
 
 GE_TAX = 0.05
@@ -15,6 +17,9 @@ MIN_VOLUME = 500
 MIN_MARGIN = 20
 BUY_LIMIT_HOURS = 4
 WATCHLIST_FILE = "watchlist.json"
+SMA_PERIOD = 7  # 7-day SMA
+EMA_PERIOD = 7  # 7-day EMA
+MOMENTUM_PERIOD = 3  # rate of change over 3 periods
 
 # ---------- HELPERS ----------
 def get_image_url(name):
@@ -35,6 +40,16 @@ def fetch_data():
     id_to_limit = {item["id"]: item.get("limit", 0) for item in mapping}
     return prices, volumes, id_to_name, id_to_limit
 
+def fetch_history(item_id):
+    try:
+        data = requests.get(HISTORY_URL.format(item_id=item_id), headers=HEADERS, timeout=10).json()
+        history = pd.DataFrame(data.get("daily", []))
+        if not history.empty:
+            history['price'] = history['average']
+        return history
+    except:
+        return pd.DataFrame()
+
 def save_watchlist(watchlist):
     with open(WATCHLIST_FILE, "w") as f:
         json.dump(watchlist, f)
@@ -44,12 +59,12 @@ def load_watchlist():
         with open(WATCHLIST_FILE, "r") as f:
             try:
                 return json.load(f)
-            except json.JSONDecodeError:
+            except:
                 return []
     return []
 
 # ---------- CALCULATIONS ----------
-def calculate_flips(prices, volumes, names, limits, min_margin=MIN_MARGIN, min_volume=MIN_VOLUME):
+def calculate_flips(prices, volumes, names, limits):
     rows = []
     for item_id, data in prices.items():
         item_id = int(item_id)
@@ -58,11 +73,11 @@ def calculate_flips(prices, volumes, names, limits, min_margin=MIN_MARGIN, min_v
             continue
         vol_data = volumes.get(str(item_id), {})
         volume = vol_data.get("highPriceVolume",0) + vol_data.get("lowPriceVolume",0)
-        if volume < min_volume:
+        if volume < MIN_VOLUME:
             continue
         real_sell = high * (1 - GE_TAX)
         real_margin = real_sell - low
-        if real_margin < min_margin:
+        if real_margin < MIN_MARGIN:
             continue
         roi = real_margin / low
         buy_limit = limits.get(item_id, 0)
@@ -70,13 +85,30 @@ def calculate_flips(prices, volumes, names, limits, min_margin=MIN_MARGIN, min_v
         fills_per_hour = volume / 24
         time_to_sell_hours = min(buy_limit / fills_per_hour, BUY_LIMIT_HOURS) if fills_per_hour>0 else 0.1
         profit_per_hour = profit_per_limit / max(time_to_sell_hours,0.1)
-
-        # Confidence score based on volume, margin, ROI
         volume_score = min(volume / 100_000, 1)
         margin_score = min(real_margin / 1000, 1)
         roi_score = min(roi / 0.1, 1)
-        confidence = round((volume_score + margin_score + roi_score)/3*100,1)
+        confidence_score = round((volume_score + margin_score + roi_score)/3*100,1)
 
+        # Historical analysis
+        hist = fetch_history(item_id)
+        if not hist.empty:
+            hist['SMA'] = hist['price'].rolling(SMA_PERIOD).mean()
+            hist['EMA'] = hist['price'].ewm(span=EMA_PERIOD, adjust=False).mean()
+            hist['Momentum'] = hist['price'].pct_change(periods=MOMENTUM_PERIOD)
+            mean = hist['price'].mean()
+            std = hist['price'].std() if hist['price'].std() > 0 else 1
+            z_score = (hist['price'].iloc[-1] - mean)/std
+            vol_avg = hist['volume'].rolling(SMA_PERIOD).mean().iloc[-1] if 'volume' in hist.columns else 1
+            volume_spike = volume / max(vol_avg, 1)
+            high_7d = hist['price'].tail(7).max()
+            low_7d = hist['price'].tail(7).min()
+        else:
+            hist = pd.DataFrame()
+            z_score = 0
+            volume_spike = 1
+            high_7d = high
+            low_7d = low
         rows.append({
             "Image": get_image_url(names.get(item_id,"Unknown")),
             "Item": names.get(item_id,"Unknown"),
@@ -88,124 +120,50 @@ def calculate_flips(prices, volumes, names, limits, min_margin=MIN_MARGIN, min_v
             "Buy Limit": buy_limit,
             "Profit per Limit": int(profit_per_limit),
             "Profit per Hour": int(profit_per_hour),
-            "Confidence": confidence
+            "Confidence": confidence_score,
+            "SMA": round(hist['SMA'].iloc[-1],2) if not hist.empty else 0,
+            "EMA": round(hist['EMA'].iloc[-1],2) if not hist.empty else 0,
+            "Momentum": round(hist['Momentum'].iloc[-1]*100,2) if not hist.empty else 0,
+            "Z-Score": round(z_score,2),
+            "Volume Spike": round(volume_spike,2),
+            "7d High": high_7d,
+            "7d Low": low_7d
         })
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows).sort_values(by="Profit per Hour", ascending=False).head(20)
 
 # ---------- DISPLAY ----------
 def render_table(df, table_key):
     df = df.copy()
-    headers = ["Img","Item","Buy","Sell","Margin","ROI %","Volume","Buy Limit","Profit/Limit","Profit/Hr","Conf","Add"]
-    col_widths = [0.5,2,1,1,1,1,1,1,1,1,1,0.3]
-    st.write("")
-    header_cols = st.columns(col_widths)
-    for col, header in zip(header_cols, headers):
-        col.markdown(f"**{header}**")
-    for idx, row in df.iterrows():
-        cols = st.columns(col_widths)
-        cols[0].markdown(f'<img src="{row["Image"]}" width="25">', unsafe_allow_html=True)
-        cols[1].markdown(f"**{row['Item']}**")
-        cols[2].markdown(f"<span style='color:green'>{row['Buy']}</span>", unsafe_allow_html=True)
-        cols[3].markdown(f"<span style='color:red'>{row['Sell']}</span>", unsafe_allow_html=True)
-        margin_color = "green" if row['Margin'] > 0 else "red"
-        cols[4].markdown(f"<span style='color:{margin_color}'>{row['Margin']}</span>", unsafe_allow_html=True)
-        cols[5].markdown(f"{row['ROI %']}", unsafe_allow_html=True)
-        cols[6].markdown(f"{row['Volume']}", unsafe_allow_html=True)
-        cols[7].markdown(f"{row['Buy Limit']}", unsafe_allow_html=True)
-        cols[8].markdown(f"{row['Profit per Limit']}", unsafe_allow_html=True)
-        cols[9].markdown(f"{row['Profit per Hour']}", unsafe_allow_html=True)
-        # Confidence coloring: green for high, red for low
-        conf_color = "green" if row['Confidence'] > 70 else "orange" if row['Confidence']>40 else "red"
-        cols[10].markdown(f"<span style='color:{conf_color}'>{row['Confidence']}</span>", unsafe_allow_html=True)
-        if cols[11].button("+", key=f"{table_key}_{idx}"):
-            if "watchlist" not in st.session_state:
-                st.session_state.watchlist = load_watchlist()
-            if row["Item"] not in [w["Item"] for w in st.session_state.watchlist]:
-                st.session_state.watchlist.append({
-                    "Image": row["Image"],
-                    "Item": row["Item"],
-                    "Buy": row["Buy"],
-                    "Sell": row["Sell"],
-                    "Volume": row["Volume"]
-                })
-                save_watchlist(st.session_state.watchlist)
-
-def render_watchlist():
-    st.sidebar.header("👁️ Watchlist")
-    watchlist = st.session_state.get("watchlist", load_watchlist())
-    if not watchlist:
-        st.sidebar.write("No trades added yet.")
-        return
-    for idx, row in enumerate(watchlist):
-        st.sidebar.markdown(
-            f"""
-            <div style="border:1px solid #aaa; padding:5px; margin-bottom:5px; border-radius:5px; font-size:12px;">
-                <div style="display:flex; align-items:center;">
-                    <img src="{row['Image']}" width="30" style="margin-right:5px;">
-                    <div>
-                        <b>{row['Item']}</b><br>
-                        <span style="color:green">Buy: {row['Buy']}</span><br>
-                        <span style="color:red">Sell: {row['Sell']}</span><br>
-                        Volume: {row['Volume']}
-                    </div>
-                    <div style="margin-left:auto;">
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True
-        )
-        if st.sidebar.button("❌", key=f"remove_{idx}"):
-            st.session_state.watchlist.pop(idx)
-            save_watchlist(st.session_state.watchlist)
-
-# ---------- AI / Momentum Suggestions ----------
-def suggest_ai_trades(df):
-    suggestions = []
+    df["Image"] = df["Image"].apply(lambda url: f'<img src="{url}" width="20" style="vertical-align:middle">')
+    # Add hover descriptions
+    headers_hover = {
+        "SMA": "Simple Moving Average over 7 days",
+        "EMA": "Exponential Moving Average over 7 days",
+        "Momentum": "Price % change over last 3 periods",
+        "Z-Score": "How far current price is from mean in std deviations",
+        "Volume Spike": "Current volume / 7-day average volume",
+        "7d High": "Highest price in last 7 days",
+        "7d Low": "Lowest price in last 7 days"
+    }
+    def render_header_with_hover(col):
+        if col in headers_hover:
+            return f'<th title="{headers_hover[col]}">{col}</th>'
+        return f'<th>{col}</th>'
+    # Build table HTML
+    table_html = "<table border='1' style='border-collapse:collapse; text-align:center;'>"
+    table_html += "<tr>" + "".join([render_header_with_hover(c) for c in df.columns]) + "</tr>"
     for _, row in df.iterrows():
-        # Simple heuristic: high volume spike or sudden margin jump
-        if row["Volume"] > 5000 and row["Margin"] > 50:
-            suggestions.append(row)
-    if not suggestions:
-        st.info("No AI-based suggestions at this time.")
-        return
-    st.subheader("🤖 AI / Momentum Suggested Trades")
-    render_table(pd.DataFrame(suggestions).sort_values(by="Profit per Hour", ascending=False).head(20), "ai_suggested")
+        table_html += "<tr>" + "".join([f"<td>{row[c]}</td>" for c in df.columns]) + "</tr>"
+    table_html += "</table>"
+    st.markdown(table_html, unsafe_allow_html=True)
 
 # ---------- MAIN ----------
-st.set_page_config(page_title="OSRS GE Dashboard AI", layout="wide")
-st.title("📊 OSRS GE Dashboard with AI Suggestions")
+st.set_page_config(page_title="OSRS GE Dashboard with Indicators", layout="wide")
+st.title("📊 OSRS GE Dashboard with Technical Indicators")
 
 prices, volumes, names, limits = fetch_data()
-if "watchlist" not in st.session_state:
-    st.session_state.watchlist = load_watchlist()
-
-# Regular profitable flips
-st.subheader("💰 Regular Profitable Trades")
-regular_df = calculate_flips(prices, volumes, names, limits)
-if regular_df.empty:
-    st.write("No regular trades found.")
+df_trades = calculate_flips(prices, volumes, names, limits)
+if df_trades.empty:
+    st.write("No trades found.")
 else:
-    render_table(regular_df.sort_values(by="Profit per Hour", ascending=False).head(20), "regular")
-
-# High volume flips
-st.subheader("📈 High Volume Flips")
-highvol_df = calculate_flips(prices, volumes, names, limits, min_margin=5, min_volume=2000)
-if highvol_df.empty:
-    st.write("No high volume flips found.")
-else:
-    render_table(highvol_df.sort_values(by="Volume", ascending=False).head(20), "highvol")
-
-# Speculative trades
-st.subheader("🔮 Speculative Trades")
-spec_df = calculate_flips(prices, volumes, names, limits, min_margin=5, min_volume=50)
-spec_df = spec_df[spec_df["ROI %"] > 0]
-if spec_df.empty:
-    st.write("No speculative trades found.")
-else:
-    render_table(spec_df.sort_values(by="ROI %", ascending=False).head(20), "spec")
-
-# AI / Momentum based suggestions
-suggest_ai_trades(pd.concat([regular_df, highvol_df, spec_df]))
-
-# Watchlist
-render_watchlist()
+    render_table(df_trades, "main_trades")
