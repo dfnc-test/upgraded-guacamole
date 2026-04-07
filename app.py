@@ -161,9 +161,6 @@ def render_table(df, table_key):
         # Button key
         btn_key = f"{table_key}_add_{idx}"
 
-        # Use streamlit button for add
-        add_clicked = st.button("➕", key=btn_key, help=f"Add {row['Item']} to Watchlist", args=None)
-
         html += (
             "<tr>"
             f"<td><img src='{row['Image']}' alt='item'></td>"
