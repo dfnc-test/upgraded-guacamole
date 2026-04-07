@@ -36,17 +36,19 @@ def fetch_data():
 
 @st.cache_data(ttl=3600)
 def fetch_history(item_id):
-    """
-    Fetch historical midpoint prices for Z-score.
-    Returns a pandas Series of mid-prices.
-    """
+    """Fetch historical midpoint prices for Z-score."""
     try:
         url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?timestep=1d&id={item_id}"
         res = requests.get(url, headers=HEADERS, timeout=10).json()
+
+        # 🔹 Debug: show raw response for first few calls
+        st.write(f"History API raw for item {item_id}:")
+        st.json(res)
+
         data = res.get("data", {}).get(str(item_id), {})
 
-        # API returns either dict of timestamps or empty dict
         if not data:
+            st.write(f"No historical data returned for item {item_id}")
             return None
 
         prices = []
@@ -64,14 +66,15 @@ def fetch_history(item_id):
                 continue
             timestamps.append(timestamp)
 
-        if len(prices) < 3:  # require at least 3 data points
+        if not prices:
+            st.write(f"No valid price points parsed for item {item_id}")
             return None
 
         return pd.Series(prices, index=pd.to_datetime(timestamps, unit='s'))
     except Exception as e:
-        print("Error fetching history:", e)
+        st.write(f"Error fetching history for {item_id}: {e}")
         return None
-
+        
 def save_watchlist(watchlist):
     with open(WATCHLIST_FILE, "w") as f:
         json.dump(watchlist, f)
