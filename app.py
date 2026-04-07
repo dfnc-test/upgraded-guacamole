@@ -38,10 +38,9 @@ def fetch_data():
 def fetch_history(item_id):
     """Fetch historical midpoint prices for Z-score."""
     try:
-        # Use a valid timestep
         url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?timestep=1h&id={item_id}"
         res = requests.get(url, headers=HEADERS, timeout=10).json()
-        data = res.get("data", {}).get(str(item_id), {})
+        data = res.get("data", {}).get(str(item_id), None)
 
         if not data:
             st.write(f"No historical data returned for item {item_id}")
@@ -49,25 +48,47 @@ def fetch_history(item_id):
 
         prices = []
         timestamps = []
-        for timestamp, point in data.items():
-            high = point.get("avgHighPrice", 0)
-            low = point.get("avgLowPrice", 0)
-            if high > 0 and low > 0:
-                prices.append((high + low)/2)
-            elif high > 0:
-                prices.append(high)
-            elif low > 0:
-                prices.append(low)
-            else:
-                continue
-            timestamps.append(timestamp)
+
+        # If data is a dict (timestamps as keys)
+        if isinstance(data, dict):
+            for timestamp, point in data.items():
+                high = point.get("avgHighPrice", 0)
+                low = point.get("avgLowPrice", 0)
+                if high > 0 and low > 0:
+                    prices.append((high + low) / 2)
+                elif high > 0:
+                    prices.append(high)
+                elif low > 0:
+                    prices.append(low)
+                else:
+                    continue
+                timestamps.append(timestamp)
+        # If data is a list (each point has 'timestamp')
+        elif isinstance(data, list):
+            for point in data:
+                timestamp = point.get("timestamp")
+                high = point.get("avgHighPrice", 0)
+                low = point.get("avgLowPrice", 0)
+                if high > 0 and low > 0:
+                    prices.append((high + low) / 2)
+                elif high > 0:
+                    prices.append(high)
+                elif low > 0:
+                    prices.append(low)
+                else:
+                    continue
+                timestamps.append(timestamp)
+        else:
+            st.write(f"Unexpected data format for item {item_id}")
+            return None
 
         if not prices:
             st.write(f"No valid price points parsed for item {item_id}")
             return None
 
-        # Return Series with timestamps as datetime
-        return pd.Series(prices, index=pd.to_datetime(timestamps, unit='s'))
+        # Convert timestamps to datetime
+        timestamps_dt = pd.to_datetime(timestamps, unit='s', errors='coerce')
+        return pd.Series(prices, index=timestamps_dt)
     except Exception as e:
         st.write(f"Error fetching history for {item_id}: {e}")
         return None
