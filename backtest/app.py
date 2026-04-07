@@ -1,22 +1,19 @@
-# backtest/app.py
 import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
-import json
-import os
-import datetime
 import matplotlib.pyplot as plt
+import random
 
 # ---------- CONFIG ----------
 LATEST_URL = "https://prices.runescape.wiki/api/v1/osrs/latest"
 MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping"
 HEADERS = {"User-Agent": "osrs-ge-backtest (redsnowcp@gmail.com)"}
 
+STARTING_GP = 5_000_000
+TRADING_MODELS = ["Z-Score", "High Volume", "Diversified"]
+TIMEFRAMES = {"30 Days": 30, "60 Days": 60, "1 Year": 365}
 GE_TAX = 0.05
-START_GOLD = 5_000_000
-NUM_ITEMS = 100  # number of items to backtest
-WATCHLIST_FILE = "../watchlist.json"
 
 # ---------- HELPERS ----------
 def get_image_url(name):
@@ -25,101 +22,125 @@ def get_image_url(name):
 
 @st.cache_data(ttl=3600)
 def fetch_prices():
-    latest = requests.get(LATEST_URL, headers=HEADERS, timeout=15).json()["data"]
-    mapping = requests.get(MAPPING_URL, headers=HEADERS, timeout=15).json()
+    data = requests.get(LATEST_URL, headers=HEADERS, timeout=10).json()["data"]
+    mapping = requests.get(MAPPING_URL, headers=HEADERS, timeout=10).json()
     id_to_name = {item["id"]: item["name"] for item in mapping}
-    id_to_limit = {item["id"]: item.get("limit", 0) for item in mapping}
-    return latest, id_to_name, id_to_limit
+    return data, id_to_name
 
 @st.cache_data(ttl=3600)
-def fetch_history(item_id, days=365, timestep="1d", timeout=30):
-    """Fetch historical prices for the last `days` days"""
+def fetch_history(item_id, timeout=30):
+    """Fetch historical midpoint prices for backtesting"""
     try:
-        url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?id={item_id}&timestep={timestep}"
+        url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?id={item_id}&timestep=1d"
         res = requests.get(url, headers=HEADERS, timeout=timeout).json()
         data = res.get("data", [])
         if not isinstance(data, list) or len(data) == 0:
             return None
-
         prices = []
-        now = int(datetime.datetime.utcnow().timestamp())
-        cutoff = now - days * 86400
-
         for point in data:
-            ts = point.get("timestamp")
-            if ts is None or ts < cutoff:
-                continue
             high = point.get("avgHighPrice", 0)
             low = point.get("avgLowPrice")
             if high and low is not None:
-                prices.append((high + low) / 2)
+                prices.append((high + low)/2)
             elif high:
                 prices.append(high)
         if len(prices) < 3:
             return None
-        return pd.Series(prices)
-    except Exception as e:
-        st.write(f"Error fetching history for {item_id}: {e}")
+        return prices
+    except:
         return None
 
-# ---------- PORTFOLIO SIMULATION ----------
-def compute_indicators(prices_series):
-    """Compute indicators for Z-score, momentum, SMA, EMA"""
-    mid = prices_series.iloc[-1]
-    sma = prices_series.mean()
-    ema = prices_series.ewm(span=5).mean().iloc[-1]
-    momentum = ((prices_series.iloc[-1] - prices_series.iloc[-2]) / prices_series.iloc[-2])*100 if len(prices_series)>1 else 0
-    z = (mid - sma)/prices_series.std(ddof=0) if prices_series.std(ddof=0) > 0 else 0
-    return mid, sma, ema, momentum, z
+def simulate_trades(item_prices, model, cash, holdings):
+    """Decide trades based on model indicators"""
+    trades = []
+    for item_id, history in item_prices.items():
+        if history is None or len(history) < 3:
+            continue
+        current_price = history[-1]
+        mean = np.mean(history)
+        std = np.std(history, ddof=0)
+        z = (current_price - mean)/std if std>0 else 0
 
-def simulate_portfolio(latest, names, limits, items, days):
-    portfolio = {"cash": START_GOLD, "holdings": {}, "history": []}
-    equity_curve = []
-    for day in range(days):
-        # Simulate each item
-        for item_id in items:
-            hist = fetch_history(item_id, days=days)
-            if hist is None or len(hist)<3:
-                continue
-            mid, sma, ema, momentum, z = compute_indicators(hist)
-            # Simple strategy: BUY if Z < -0.5, SELL if Z > 0.5
-            if z < -0.5 and portfolio["cash"] >= mid:
-                qty = int(portfolio["cash"] // mid)
-                portfolio["holdings"][item_id] = portfolio["holdings"].get(item_id,0) + qty
-                portfolio["cash"] -= qty * mid
-            elif z > 0.5 and item_id in portfolio["holdings"]:
-                qty = portfolio["holdings"].pop(item_id)
-                portfolio["cash"] += qty * mid
-        # Calculate total equity
-        total = portfolio["cash"]
-        for item_id, qty in portfolio["holdings"].items():
-            price = latest.get(str(item_id), {}).get("high") or latest.get(str(item_id), {}).get("low") or 0
-            total += price*qty
-        equity_curve.append(total)
-    return equity_curve
+        # Model strategies
+        if model == "Z-Score" and z < -0.5:
+            trades.append((item_id, current_price))
+        elif model == "High Volume" and current_price > 50:  # simple placeholder for high volume
+            trades.append((item_id, current_price))
+        elif model == "Diversified" and (z < -0.3 or current_price > 50):
+            trades.append((item_id, current_price))
+
+    # Execute trades
+    for item_id, price in trades:
+        qty = int(cash / (len(trades) * price)) if trades else 0
+        if qty > 0:
+            holdings[item_id] = holdings.get(item_id, 0) + qty
+            cash -= qty * price
+    return cash, holdings
+
+def calculate_portfolio_value(holdings, current_prices, cash):
+    value = cash
+    for item_id, qty in holdings.items():
+        value += qty * current_prices.get(item_id, 0)
+    return value
 
 # ---------- MAIN ----------
-st.set_page_config(layout="wide")
-st.title("🤖 OSRS GE Backtest Simulator")
+st.title("📈 OSRS GE Backtest Simulator")
+st.write("Simulates 3 trading models over 30/60/365 days using historical GE data.")
 
-st.write(f"Simulating {NUM_ITEMS} items, starting with {START_GOLD} gp per portfolio.")
+# Fetch data
+st.info("Fetching latest GE data...")
+prices, names = fetch_prices()
 
-latest, names, limits = fetch_prices()
-all_items = list(latest.keys())[:NUM_ITEMS]
+# Pick top 100 items by high price as candidates
+top_items = dict(sorted(prices.items(), key=lambda x: x[1].get("high",0), reverse=True)[:100])
 
-timeframes = [30, 60, 365]
-results = {}
+# Fetch historical data
+st.info("Fetching historical data (this may take a minute)...")
+item_histories = {}
+for item_id in top_items.keys():
+    hist = fetch_history(int(item_id))
+    if hist:
+        item_histories[int(item_id)] = hist
 
-for days in timeframes:
-    st.subheader(f"⏱ Backtest over last {days} days")
-    equity_curve = simulate_portfolio(latest, names, limits, all_items, days)
-    results[days] = equity_curve
-    # Plot equity curve
-    plt.figure(figsize=(10,4))
-    plt.plot(equity_curve, label=f"Equity over {days} days")
-    plt.ylabel("Total GP")
-    plt.xlabel("Simulation step")
+# Run backtests
+results = {tf: {model: [] for model in TRADING_MODELS} for tf in TIMEFRAMES}
+
+for tf_name, days in TIMEFRAMES.items():
+    st.info(f"Simulating {tf_name}...")
+    for model in TRADING_MODELS:
+        cash = STARTING_GP
+        holdings = {}
+        portfolio_values = []
+        for day in range(days):
+            # Collect current prices for this day
+            current_prices = {item_id: hist[min(day, len(hist)-1)] for item_id, hist in item_histories.items()}
+            # Decide trades
+            cash, holdings = simulate_trades(item_histories, model, cash, holdings)
+            # Portfolio value
+            portfolio_values.append(calculate_portfolio_value(holdings, current_prices, cash))
+        results[tf_name][model] = portfolio_values
+
+# ---------- DISPLAY ----------
+st.subheader("📊 Portfolio Performance")
+for tf_name, days in TIMEFRAMES.items():
+    st.write(f"### {tf_name}")
+    plt.figure(figsize=(12,5))
+    for model in TRADING_MODELS:
+        plt.plot(results[tf_name][model], label=model)
+    plt.xlabel("Days")
+    plt.ylabel("Portfolio Value (GP)")
+    plt.title(f"{tf_name} Performance")
     plt.legend()
-    st.pyplot(plt)
+    st.pyplot(plt.gcf())
+    plt.clf()
 
-st.success("Backtest complete. Portfolios simulated using Z-score and momentum indicators.")
+# Summary Table
+st.subheader("💰 Portfolio Summary")
+summary_data = []
+for tf_name in TIMEFRAMES.keys():
+    for model in TRADING_MODELS:
+        final_value = results[tf_name][model][-1] if results[tf_name][model] else STARTING_GP
+        summary_data.append({"Timeframe": tf_name, "Model": model, "Final GP": int(final_value)})
+
+df_summary = pd.DataFrame(summary_data)
+st.dataframe(df_summary)
