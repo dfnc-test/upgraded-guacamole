@@ -70,10 +70,6 @@ def calculate_flips(prices, volumes, names, limits):
         fills_per_hour = volume / 24
         time_to_sell_hours = min(buy_limit / fills_per_hour, BUY_LIMIT_HOURS) if fills_per_hour>0 else 0.1
         profit_per_hour = profit_per_limit / max(time_to_sell_hours,0.1)
-        volume_score = min(volume / 100_000, 1)
-        margin_score = min(real_margin / 1000, 1)
-        roi_score = min(roi / 0.1, 1)
-        confidence_score = round((volume_score + margin_score + roi_score)/3*100,1)
         rows.append({
             "Image": get_image_url(names.get(item_id,"Unknown")),
             "Item": names.get(item_id,"Unknown"),
@@ -84,60 +80,38 @@ def calculate_flips(prices, volumes, names, limits):
             "Volume": volume,
             "Buy Limit": buy_limit,
             "Profit per Limit": int(profit_per_limit),
-            "Profit per Hour": int(profit_per_hour),
-            "Confidence": confidence_score
+            "Profit per Hour": int(profit_per_hour)
         })
     return pd.DataFrame(rows).sort_values(by="Profit per Hour", ascending=False).head(20)
 
 # ---------- DISPLAY ----------
 def render_table(df, table_key):
     df = df.copy()
-    # Color formatting
-    def color_margin(val):
-        if val > 0:
-            return f"color: rgb({255-int(min(val,1000)/1000*255)}, {min(val,1000)/1000*200+55}, 0)"
-        else:
-            return "color: red"
-    def color_buy(val):
-        return "color: green"
-    def color_sell(val):
-        return "color: red"
-    def muted(val):
-        return "color: gray"
 
-    # Render table headers
-    cols = st.columns([1,3,1,1,1,1,1,1,1,1,1,0.5])
-    headers = ["Img","Item","Buy","Sell","Margin","ROI %","Volume","Buy Limit","Profit/Limit","Profit/Hr","Conf","Add"]
-    for col, text in zip(cols, headers):
-        col.markdown(f"**{text}**")
+    # Table headers
+    headers = ["Img","Item","Buy","Sell","Margin","ROI %","Volume","Buy Limit","Profit/Limit","Profit/Hr","Add"]
+    col_widths = [0.5,2,1,1,1,1,1,1,1,1,0.3]
+    st.write("")  # spacing
+    header_cols = st.columns(col_widths)
+    for col, header in zip(header_cols, headers):
+        col.markdown(f"**{header}**")
 
-    # Render rows
+    # Table rows
     for idx, row in df.iterrows():
-        cols = st.columns([1,3,1,1,1,1,1,1,1,1,1,0.5])
-        # Image
+        cols = st.columns(col_widths)
         cols[0].markdown(f'<img src="{row["Image"]}" width="25">', unsafe_allow_html=True)
-        # Item
         cols[1].markdown(f"**{row['Item']}**")
-        # Buy
-        cols[2].markdown(f"<span style='{color_buy(row['Buy'])}'>{row['Buy']}</span>", unsafe_allow_html=True)
-        # Sell
-        cols[3].markdown(f"<span style='{color_sell(row['Sell'])}'>{row['Sell']}</span>", unsafe_allow_html=True)
-        # Margin
-        cols[4].markdown(f"<span style='{color_margin(row['Margin'])}'>{row['Margin']}</span>", unsafe_allow_html=True)
-        # ROI
-        cols[5].markdown(f"<span style='{muted(row['ROI %'])}'>{row['ROI %']}</span>", unsafe_allow_html=True)
-        # Volume
-        cols[6].markdown(f"<span style='{muted(row['Volume'])}'>{row['Volume']}</span>", unsafe_allow_html=True)
-        # Buy Limit
-        cols[7].markdown(f"<span style='{muted(row['Buy Limit'])}'>{row['Buy Limit']}</span>", unsafe_allow_html=True)
-        # Profit per Limit
-        cols[8].markdown(f"<span style='{muted(row['Profit per Limit'])}'>{row['Profit per Limit']}</span>", unsafe_allow_html=True)
-        # Profit per Hour
-        cols[9].markdown(f"<span style='{muted(row['Profit per Hour'])}'>{row['Profit per Hour']}</span>", unsafe_allow_html=True)
-        # Confidence
-        cols[10].markdown(f"<span style='{muted(row['Confidence'])}'>{row['Confidence']}</span>", unsafe_allow_html=True)
-        # Add button
-        if st.button("+", key=f"{table_key}_{idx}"):
+        cols[2].markdown(f"<span style='color:green'>{row['Buy']}</span>", unsafe_allow_html=True)
+        cols[3].markdown(f"<span style='color:red'>{row['Sell']}</span>", unsafe_allow_html=True)
+        margin_color = "green" if row['Margin'] > 0 else "red"
+        cols[4].markdown(f"<span style='color:{margin_color}'>{row['Margin']}</span>", unsafe_allow_html=True)
+        cols[5].markdown(f"{row['ROI %']}", unsafe_allow_html=True)
+        cols[6].markdown(f"{row['Volume']}", unsafe_allow_html=True)
+        cols[7].markdown(f"{row['Buy Limit']}", unsafe_allow_html=True)
+        cols[8].markdown(f"{row['Profit per Limit']}", unsafe_allow_html=True)
+        cols[9].markdown(f"{row['Profit per Hour']}", unsafe_allow_html=True)
+        # Inline add button
+        if cols[10].button("+", key=f"{table_key}_{idx}"):
             if "watchlist" not in st.session_state:
                 st.session_state.watchlist = load_watchlist()
             if row["Item"] not in [w["Item"] for w in st.session_state.watchlist]:
@@ -149,7 +123,6 @@ def render_table(df, table_key):
                     "Volume": row["Volume"]
                 })
                 save_watchlist(st.session_state.watchlist)
-                st.experimental_rerun()
 
 def render_watchlist():
     st.sidebar.header("👁️ Watchlist")
@@ -158,21 +131,15 @@ def render_watchlist():
         st.sidebar.write("No trades added yet.")
         return
     for idx, row in enumerate(watchlist):
-        cols = st.sidebar.columns([1,3,1,1,1])
-        # Image + item
+        cols = st.sidebar.columns([1,3,1,1,1,0.3])
         cols[0].markdown(f'<img src="{row["Image"]}" width="25">', unsafe_allow_html=True)
         cols[1].markdown(f"**{row['Item']}**")
-        # Buy
         cols[2].markdown(f"<span style='color:green'>{row['Buy']}</span>", unsafe_allow_html=True)
-        # Sell
         cols[3].markdown(f"<span style='color:red'>{row['Sell']}</span>", unsafe_allow_html=True)
-        # Volume
-        cols[4].markdown(f"<span style='color:gray'>{row['Volume']}</span>", unsafe_allow_html=True)
-        # Remove button
-        if st.sidebar.button("❌", key=f"remove_{idx}"):
+        cols[4].markdown(f"{row['Volume']}", unsafe_allow_html=True)
+        if cols[5].button("❌", key=f"remove_{idx}"):
             st.session_state.watchlist.pop(idx)
             save_watchlist(st.session_state.watchlist)
-            st.experimental_rerun()
 
 # ---------- MAIN ----------
 st.set_page_config(page_title="OSRS GE Dashboard", layout="wide")
