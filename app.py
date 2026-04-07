@@ -102,23 +102,25 @@ def high_volume_flips(prices, volumes, names, types, min_volume=2000, max_margin
     if df.empty: return df
     return df.sort_values(by="Volume", ascending=False).head(20)
 
-# ---------- SPECULATIVE TRADES WITH CONFIDENCE ----------
-def speculative_trades(prices, volumes, names):
-    rows=[]
+def speculative_trades(prices, volumes, names, min_days=3, underpriced_pct=0.85):
+    rows = []
     for item_id, data in prices.items():
-        item_id=int(item_id)
+        item_id = int(item_id)
         low = data.get("low")
-        if not low or low<=0: continue
+        if not low or low <= 0:
+            continue
         try:
             hist_res = requests.get(f"{HISTORICAL_URL}{item_id}", headers=HEADERS, timeout=5)
-            hist_data = hist_res.json().get("data",{})
-            if not hist_data: continue
-            prices_list = list(hist_data.values())[-SPEC_LOOKBACK_DAYS:]
+            hist_data = hist_res.json().get("data", {})
+            if not hist_data or len(hist_data) < min_days:
+                continue
+            # take the last N days available
+            prices_list = list(hist_data.values())[-min_days:]
             avg_price = np.mean(prices_list)
-            if low < avg_price*SPEC_UNDERPRICED_PCT:
-                volume = volumes.get(str(item_id),{}).get("highPriceVolume",0)+volumes.get(str(item_id),{}).get("lowPriceVolume",0)
+            if low < avg_price * underpriced_pct:
+                volume = volumes.get(str(item_id), {}).get("highPriceVolume",0) + volumes.get(str(item_id), {}).get("lowPriceVolume",0)
                 margin = avg_price - low
-                confidence_score = round(min(volume/100_000,1)*0.5 + min(margin/1000,1)*0.5*100,1)  # simple weighted score
+                confidence_score = round(min(volume/100_000,1)*0.5 + min(margin/1000,1)*0.5*100,1)
                 rows.append({
                     "Item": names.get(item_id,"Unknown"),
                     "Current Low": low,
@@ -130,7 +132,8 @@ def speculative_trades(prices, volumes, names):
         except:
             continue
     df = pd.DataFrame(rows)
-    if df.empty: return df
+    if df.empty:
+        return pd.DataFrame(columns=["Item","Current Low","Historical Avg","Potential Margin","Volume","Confidence"])
     return df.sort_values(by="Confidence", ascending=False).head(20)
 
 # ---------- UI ----------
