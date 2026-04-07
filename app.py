@@ -115,22 +115,27 @@ def calculate_flips(prices, volumes, names, limits):
         momentum = ((high - low) / low) * 100 if low > 0 else 0
         
         # Spread
+        # -------- FIXED Z + SIGNAL --------
+
         spread = max(high - low, 1)
         
-        # Z-score proxy (profit strength vs spread)
-        z = margin / spread
+        # Price position (normalized)
+        price_position = (low - (low * 0.97)) / (spread * 1.2)
+        
+        # Margin strength
+        margin_strength = margin / max(low, 1)
+        
+        # Final Z score (blended)
+        z = (price_position * 0.5) + (margin_strength * 0.5)
+        z = max(0, min(z, 2))
         
         # Volume spike
         vol_spike = min(volume / 10000, 5)
         
-        # 7-day proxies (FIXED ERROR)
-        high_7d = high
-        low_7d = low
-        
-        # -------- TRADE SIGNAL --------
-        if z > 0.6 and vol_spike > 1:
+        # Signals
+        if z < 0.4 and vol_spike > 1:
             signal = "BUY"
-        elif z < 0.2:
+        elif z > 1.2:
             signal = "SELL"
         else:
             signal = "HOLD"
