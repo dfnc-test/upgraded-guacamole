@@ -35,20 +35,27 @@ def fetch_data():
 
 def fetch_history(item_id):
     try:
-        url = f"{HISTORY_URL}?id={item_id}&timestep=24h"
+        url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?id={item_id}&timestep=24h"
         res = requests.get(url, headers=HEADERS, timeout=10)
         data = res.json().get("data", {})
 
-        rows = []
-        for ts, val in data.items():
-            price = val.get("avgHighPrice") or val.get("avgLowPrice")
-            if price:
-                rows.append(price)
+        prices = []
 
-        if len(rows) < 5:
+        for ts, val in data.items():
+            high = val.get("avgHighPrice", 0)
+            low = val.get("avgLowPrice", 0)
+
+            # ✅ FIX: ignore zeros, prefer real data
+            if high > 0:
+                prices.append(high)
+            elif low > 0:
+                prices.append(low)
+
+        # need enough real data
+        if len(prices) < 5:
             return None
 
-        return pd.Series(rows)
+        return pd.Series(prices)
 
     except:
         return None
@@ -97,20 +104,30 @@ def calculate_flips(prices, volumes, names, limits):
         # -------- INDICATORS --------
         history = fetch_history(item_id)
 
-        if history is not None:
+        if history is not None and len(history) >= 5:
             sma = history.tail(7).mean()
-            ema = history.ewm(span=7).mean().iloc[-1]
-
-            momentum = ((history.iloc[-1] - history.iloc[-3]) / history.iloc[-3]) * 100 if len(history) > 3 else 0
-
+        
+            ema = history.ewm(span=7, adjust=False).mean().iloc[-1]
+        
+            if len(history) > 3:
+                momentum = ((history.iloc[-1] - history.iloc[-3]) / history.iloc[-3]) * 100
+            else:
+                momentum = 0
+        
             mean = history.mean()
-            std = history.std() if history.std() > 0 else 1
-            z = (history.iloc[-1] - mean) / std
-
+            std = history.std()
+        
+            if std > 0:
+                z = (history.iloc[-1] - mean) / std
+            else:
+                z = 0
+        
             high_7d = history.tail(7).max()
             low_7d = history.tail(7).min()
-
-            vol_spike = volume / (volume / 2)  # simple proxy
+        
+            # ✅ Better volume spike proxy
+            vol_spike = min(volume / 10000, 5)
+        
         else:
             sma = ema = momentum = z = 0
             high_7d = high
