@@ -106,6 +106,11 @@ def calculate_flips(prices, volumes, names, limits):
         # -------- INDICATORS --------
         history = fetch_history(item_id)
 
+        if history is None:
+            print(f"{item_id}: NO HISTORY")
+        else:
+            print(f"{item_id}: {len(history)} points")
+
         if history is not None and len(history) >= 10:
         
             sma = history.rolling(10).mean().iloc[-1]
