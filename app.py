@@ -133,20 +133,7 @@ def render_table_with_add_buttons(df, table_key):
 
     st.markdown(final_html, unsafe_allow_html=True)
 
-    # Now add actual Streamlit buttons aligned with rows below the table for interaction
-    for idx, row in df.iterrows():
-        col1, col2, col3 = st.columns([0.9, 8, 1])
-        with col3:
-            button_label = f"Add '{row['Item']}'"
-            button_key = f"{table_key}_btn_{idx}"
-            if st.button(button_label, key=button_key):
-                if "watchlist" not in st.session_state:
-                    st.session_state.watchlist = load_watchlist()
-                # Avoid duplicates by Item name
-                if row["Item"] not in [w["Item"] for w in st.session_state.watchlist]:
-                    st.session_state.watchlist.append(row.drop(labels=["Add"]).to_dict())
-                    save_watchlist(st.session_state.watchlist)
-                st.experimental_rerun()
+
 
 def render_watchlist():
     st.sidebar.header("👁️ Watchlist")
