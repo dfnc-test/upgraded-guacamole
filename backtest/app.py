@@ -2,152 +2,156 @@ import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import random
+import matplotlib.pyplot as plt
 
 # ---------- CONFIG ----------
 LATEST_URL = "https://prices.runescape.wiki/api/v1/osrs/latest"
+VOLUME_URL = "https://prices.runescape.wiki/api/v1/osrs/24h"
 MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping"
-HEADERS = {"User-Agent": "osrs-ge-backtest (redsnowcp@gmail.com)"}
 
-STARTING_GP = 5_000_000
-TRADING_MODELS = ["Z-Score", "High Volume", "Diversified"]
-TIMEFRAMES = {"30 Days": 30, "60 Days": 60, "1 Year": 365}
+HEADERS = {"User-Agent": "osrs-ge-dashboard (redsnowcp@gmail.com)"}
+
 GE_TAX = 0.05
+MIN_VOLUME = 500
+BUY_LIMIT_HOURS = 4
+START_GP = 5_000_000
+MAX_ITEMS = 100  # max items to backtest
 
 # ---------- HELPERS ----------
 def get_image_url(name):
     formatted = name.replace(" ", "_").replace("'", "").replace("(", "").replace(")", "")
     return f"https://oldschool.runescape.wiki/images/{formatted}.png"
 
-@st.cache_data(ttl=3600)
-def fetch_prices():
-    data = requests.get(LATEST_URL, headers=HEADERS, timeout=10).json()["data"]
+@st.cache_data(ttl=60)
+def fetch_data():
+    prices = requests.get(LATEST_URL, headers=HEADERS, timeout=10).json()["data"]
+    volumes = requests.get(VOLUME_URL, headers=HEADERS, timeout=10).json()["data"]
     mapping = requests.get(MAPPING_URL, headers=HEADERS, timeout=10).json()
     id_to_name = {item["id"]: item["name"] for item in mapping}
-    return data, id_to_name
+    id_to_limit = {item["id"]: item.get("limit", 0) for item in mapping}
+    return prices, volumes, id_to_name, id_to_limit
 
 @st.cache_data(ttl=3600)
 def fetch_history(item_id, timeout=30):
     """Fetch historical midpoint prices for backtesting"""
     try:
-        url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?id={item_id}&timestep=1d"
+        url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?id={item_id}&timestep=1h"
         res = requests.get(url, headers=HEADERS, timeout=timeout).json()
         data = res.get("data", [])
-        if not isinstance(data, list) or len(data) == 0:
+        if not data or not isinstance(data, list):
             return None
         prices = []
         for point in data:
-            high = point.get("avgHighPrice", 0)
+            high = point.get("avgHighPrice")
             low = point.get("avgLowPrice")
             if high and low is not None:
                 prices.append((high + low)/2)
             elif high:
                 prices.append(high)
-        if len(prices) < 3:
-            return None
-        return prices
-    except:
+        return pd.Series(prices) if len(prices) >= 7 else None
+    except Exception as e:
+        st.write(f"Error fetching history for {item_id}: {e}")
         return None
 
-def simulate_trades(item_prices, model, cash, holdings):
-    """Decide trades based on model indicators"""
-    trades = []
-    for item_id, history in item_prices.items():
-        if history is None or len(history) < 3:
-            continue
-        current_price = history[-1]
-        mean = np.mean(history)
-        std = np.std(history, ddof=0)
-        z = (current_price - mean)/std if std>0 else 0
+# ---------- BACKTEST ----------
+def simulate_portfolio(items, model_name, days, start_gp=START_GP):
+    """Simulate trades for one model over given days"""
+    portfolio = {"cash": start_gp, "holdings": {}}
+    timeline = []
 
-        # Model strategies
-        if model == "Z-Score" and z < -0.5:
-            trades.append((item_id, current_price))
-        elif model == "High Volume" and current_price > 50:  # simple placeholder for high volume
-            trades.append((item_id, current_price))
-        elif model == "Diversified" and (z < -0.3 or current_price > 50):
-            trades.append((item_id, current_price))
+    for t in range(days):
+        # compute current item prices at this timestep
+        for item_id, hist in items.items():
+            if t >= len(hist):
+                continue
+            current_price = hist.iloc[t]
 
-    # Execute trades
-    for item_id, price in trades:
-        qty = int(cash / (len(trades) * price)) if trades else 0
-        if qty > 0:
-            holdings[item_id] = holdings.get(item_id, 0) + qty
-            cash -= qty * price
-    return cash, holdings
+            # compute indicators
+            hist_slice = hist[:t+1]
+            hist_mean = hist_slice.mean()
+            hist_std = hist_slice.std(ddof=0) if hist_slice.std(ddof=0)>0 else 1
+            z = (current_price - hist_mean)/hist_std
+            margin = current_price - hist_slice.iloc[-2] if t>0 else 0
+            roi = margin / hist_slice.iloc[-2] if t>0 else 0
+            vol_spike = 1  # placeholder
 
-def calculate_portfolio_value(holdings, current_prices, cash):
-    value = cash
-    for item_id, qty in holdings.items():
-        value += qty * current_prices.get(item_id, 0)
-    return value
+            # model decision
+            buy = False
+            sell = False
+            if model_name == "Z-score":
+                if z < -0.5: buy = True
+                if z > 0.5: sell = True
+            elif model_name == "High Margin":
+                if margin > 20: buy = True
+                if roi > 0.1: sell = True
+            elif model_name == "Combined":
+                score = z + roi + margin/50
+                if score > 0.5: buy = True
+                if score < -0.5: sell = True
+
+            # execute sell
+            if item_id in portfolio["holdings"] and sell:
+                qty = portfolio["holdings"].pop(item_id)
+                portfolio["cash"] += qty * current_price * (1-GE_TAX)
+
+            # execute buy
+            if buy and portfolio["cash"] > 1000:
+                max_affordable = int(portfolio["cash"] / current_price)
+                if max_affordable > 0:
+                    qty = min(max_affordable, 100)  # limit per trade
+                    portfolio["holdings"][item_id] = portfolio["holdings"].get(item_id,0)+qty
+                    portfolio["cash"] -= qty * current_price
+
+        # record total value
+        total_value = portfolio["cash"]
+        for item_id, qty in portfolio["holdings"].items():
+            price = items[item_id].iloc[t]
+            total_value += qty * price
+        timeline.append(total_value)
+
+    return timeline[-1], timeline  # final value, timeline
 
 # ---------- MAIN ----------
-st.title("📈 OSRS GE Backtest Simulator")
-st.write("Simulates 3 trading models over 30/60/365 days using historical GE data.")
+st.set_page_config(layout="wide")
+st.title("📊 OSRS GE Backtest Simulator")
 
-# Fetch data
-st.info("Fetching latest GE data...")
-prices, names = fetch_prices()
+prices, volumes, names, limits = fetch_data()
 
-# Pick top 100 items by high price as candidates
-# Pick top 100 items by high price as candidates, skipping None
-top_items = dict(
-    sorted(
-        ((item_id, data) for item_id, data in prices.items() if data.get("high") is not None),
-        key=lambda x: x[1]["high"],
-        reverse=True
-    )[:100]
-)
+# pick top MAX_ITEMS items by volume
+sorted_items = sorted(prices.keys(), key=lambda x: volumes.get(str(x), {}).get("highPriceVolume",0)+volumes.get(str(x), {}).get("lowPriceVolume",0), reverse=True)[:MAX_ITEMS]
 
-# Fetch historical data
-st.info("Fetching historical data (this may take a minute)...")
-item_histories = {}
-for item_id in top_items.keys():
+# fetch historical data
+st.info("Fetching historical data (may take some time)...")
+items_hist = {}
+for i, item_id in enumerate(sorted_items):
     hist = fetch_history(int(item_id))
-    if hist:
-        item_histories[int(item_id)] = hist
+    if hist is not None:
+        items_hist[int(item_id)] = hist
+st.success(f"Fetched history for {len(items_hist)} items")
 
-# Run backtests
-results = {tf: {model: [] for model in TRADING_MODELS} for tf in TIMEFRAMES}
+models = ["Z-score","High Margin","Combined"]
+timeframes = {"30d":30*24,"60d":60*24,"365d":365*24}  # in hours
+results = {}
 
-for tf_name, days in TIMEFRAMES.items():
-    st.info(f"Simulating {tf_name}...")
-    for model in TRADING_MODELS:
-        cash = STARTING_GP
-        holdings = {}
-        portfolio_values = []
-        for day in range(days):
-            # Collect current prices for this day
-            current_prices = {item_id: hist[min(day, len(hist)-1)] for item_id, hist in item_histories.items()}
-            # Decide trades
-            cash, holdings = simulate_trades(item_histories, model, cash, holdings)
-            # Portfolio value
-            portfolio_values.append(calculate_portfolio_value(holdings, current_prices, cash))
-        results[tf_name][model] = portfolio_values
+for model in models:
+    results[model] = {}
+    for label, days in timeframes.items():
+        final_value, timeline = simulate_portfolio(items_hist, model, min(days, max(len(h) for h in items_hist.values())))
+        results[model][label] = final_value
 
-# ---------- DISPLAY ----------
-st.subheader("📊 Portfolio Performance")
-for tf_name, days in TIMEFRAMES.items():
-    st.write(f"### {tf_name}")
-    plt.figure(figsize=(12,5))
-    for model in TRADING_MODELS:
-        plt.plot(results[tf_name][model], label=model)
-    plt.xlabel("Days")
-    plt.ylabel("Portfolio Value (GP)")
-    plt.title(f"{tf_name} Performance")
-    plt.legend()
-    st.pyplot(plt.gcf())
-    plt.clf()
+# ---------- DISPLAY TABLE ----------
+df_results = pd.DataFrame(results).T[["30d","60d","365d"]]
+st.subheader("📊 Portfolio Performance Table (GP)")
+st.dataframe(df_results.style.format("{:,.0f}"))
 
-# Summary Table
-st.subheader("💰 Portfolio Summary")
-summary_data = []
-for tf_name in TIMEFRAMES.keys():
-    for model in TRADING_MODELS:
-        final_value = results[tf_name][model][-1] if results[tf_name][model] else STARTING_GP
-        summary_data.append({"Timeframe": tf_name, "Model": model, "Final GP": int(final_value)})
-
-df_summary = pd.DataFrame(summary_data)
-st.dataframe(df_summary)
+# ---------- DISPLAY GRAPHS ----------
+st.subheader("📈 Portfolio Performance Over Time")
+fig, ax = plt.subplots(figsize=(10,5))
+for model in models:
+    _, timeline = simulate_portfolio(items_hist, model, max(timeframes.values()))
+    ax.plot(timeline, label=model)
+ax.set_xlabel("Hours")
+ax.set_ylabel("Total GP")
+ax.legend()
+st.pyplot(fig)
