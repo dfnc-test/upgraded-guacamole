@@ -40,7 +40,7 @@ def fetch_history(item_id):
     try:
         url = f"{HISTORY_URL}?timestep=1h&id={item_id}"  # hourly data
         res = requests.get(url, headers=HEADERS, timeout=20).json()
-        data_list = res.get("data", {}).get(str(item_id), [])  # <- list of dicts
+        data_list = res.get("data", {}).get(str(item_id), [])
 
         prices = []
         timestamps = []
@@ -81,14 +81,14 @@ def load_watchlist():
 # ---------- CALCULATIONS ----------
 def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
     rows = []
-    for item_id, data in prices.items():
-        item_id = int(item_id)
+    for item_id_str, data in prices.items():
+        item_id = int(item_id_str)
         high, low = data.get("high"), data.get("low")
         if not high or not low or low <= 0:
             continue
 
         vol_data = volumes.get(str(item_id), {})
-        volume = vol_data.get("highPriceVolume", 0) + vol_data.get("lowPriceVolume", 0)
+        volume = vol_data.get("highPriceVolume",0) + vol_data.get("lowPriceVolume",0)
         if volume < min_vol:
             continue
 
@@ -104,22 +104,22 @@ def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
         time_to_sell = min(buy_limit / fills_per_hour, BUY_LIMIT_HOURS) if fills_per_hour>0 else 0.1
         profit_hour = profit_limit / max(time_to_sell, 0.1)
 
-        mid_price = (high + low) / 2
+        mid_price = (high + low)/2
         sma = mid_price
         ema = (mid_price*0.7 + low*0.3)
         momentum = ((high-low)/low)*100 if low>0 else 0
         vol_spike = min(volume/10000,5)
 
-        # Z-score using historical mid-prices
+        # ----- Z-SCORE using historical mid-prices -----
         hist = fetch_history(item_id)
         if hist is not None and len(hist) >= 3:
             hist_mean = hist.mean()
             hist_std = hist.std(ddof=0)
             z = (mid_price - hist_mean) / hist_std if hist_std > 0 else 0.0
         else:
-            z = 0.0
+            z = 0.0  # fallback if no history
 
-        # Signal based on Z-score
+        # ----- Signal based on Z-score -----
         if z < -0.5 and vol_spike > 1:
             signal = "BUY"
         elif z > 0.5:
@@ -146,7 +146,7 @@ def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
             "SMA": int(sma),
             "EMA": int(ema),
             "Momentum": round(momentum,2),
-            "Z": round(z,2),
+            "Z": round(z,2) if not np.isnan(z) else "N/A",
             "Vol Spike": round(vol_spike,2),
             "Signal": signal
         })
@@ -216,7 +216,7 @@ def render_watchlist():
 
 # ---------- MAIN ----------
 st.set_page_config(layout="wide")
-st.title("📊 OSRS GE Dashboard")
+st.title("📊 OSRS GE Dashboard (High Volume Z-Scores)")
 
 prices, volumes, names, limits = fetch_data()
 
