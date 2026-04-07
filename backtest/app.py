@@ -61,56 +61,56 @@ def simulate_portfolio(items, model_name, days, start_gp=START_GP):
     timeline = []
 
     # Safe backtest loop
-for t in range(days):
-    buy_candidates = []
-    for item_id, hist in items.items():
-        if t >= len(hist):
-            continue
-        current_price = hist.iloc[t]
-
-        if t < 1 or len(hist[:t+1]) < 2:
-            margin = 0
-            roi = 0
-        else:
-            prev_price = hist.iloc[t-1]
-            margin = current_price - prev_price
-            roi = margin / prev_price if prev_price != 0 else 0
-
-        hist_slice = hist[:t+1]
-        hist_mean = hist_slice.mean()
-        hist_std = hist_slice.std(ddof=0) if hist_slice.std(ddof=0) > 0 else 1
-        z = (current_price - hist_mean) / hist_std
-
-        buy = False
-        sell = False
-        if model_name == "Z-score":
-            if z < -0.5: buy = True
-            if z > 0.5: sell = True
-        elif model_name == "High Margin":
-            if margin > 20: buy = True
-            if roi > 0.1: sell = True
-        elif model_name == "Combined":
-            score = z + roi + margin/50
-            if score > 0.5: buy = True
-            if score < -0.5: sell = True
-
-        # prioritize sell first
-        if item_id in portfolio["holdings"] and sell:
-            qty = portfolio["holdings"].pop(item_id)
-            portfolio["cash"] += qty * current_price * (1-GE_TAX)
-
-        # queue buy candidates
-        if buy:
-            buy_candidates.append((item_id, current_price))
-
-        # record total value
-        total_value = portfolio["cash"]
-        for item_id, qty in portfolio["holdings"].items():
-            price = items[item_id].iloc[t]
-            total_value += qty * price
-        timeline.append(total_value)
-
-    return timeline[-1], timeline  # final value, timeline
+    for t in range(days):
+        buy_candidates = []
+        for item_id, hist in items.items():
+            if t >= len(hist):
+                continue
+            current_price = hist.iloc[t]
+    
+            if t < 1 or len(hist[:t+1]) < 2:
+                margin = 0
+                roi = 0
+            else:
+                prev_price = hist.iloc[t-1]
+                margin = current_price - prev_price
+                roi = margin / prev_price if prev_price != 0 else 0
+    
+            hist_slice = hist[:t+1]
+            hist_mean = hist_slice.mean()
+            hist_std = hist_slice.std(ddof=0) if hist_slice.std(ddof=0) > 0 else 1
+            z = (current_price - hist_mean) / hist_std
+    
+            buy = False
+            sell = False
+            if model_name == "Z-score":
+                if z < -0.5: buy = True
+                if z > 0.5: sell = True
+            elif model_name == "High Margin":
+                if margin > 20: buy = True
+                if roi > 0.1: sell = True
+            elif model_name == "Combined":
+                score = z + roi + margin/50
+                if score > 0.5: buy = True
+                if score < -0.5: sell = True
+    
+            # prioritize sell first
+            if item_id in portfolio["holdings"] and sell:
+                qty = portfolio["holdings"].pop(item_id)
+                portfolio["cash"] += qty * current_price * (1-GE_TAX)
+    
+            # queue buy candidates
+            if buy:
+                buy_candidates.append((item_id, current_price))
+    
+            # record total value
+            total_value = portfolio["cash"]
+            for item_id, qty in portfolio["holdings"].items():
+                price = items[item_id].iloc[t]
+                total_value += qty * price
+            timeline.append(total_value)
+    
+        return timeline[-1], timeline  # final value, timeline
 
 # ---------- MAIN ----------
 st.set_page_config(layout="wide")
