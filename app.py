@@ -95,44 +95,98 @@ def render_table(df, table_key):
         st.write("No trades found.")
         return
 
-    st.markdown(
-        """
+    # CSS for professional table style
+    st.markdown("""
         <style>
-        .trade-table {border-collapse: collapse; width: 100%;}
-        .trade-table th, .trade-table td {padding: 4px 6px; font-size: 13px; text-align:center; vertical-align: middle;}
-        .trade-table th {background-color: #f2f2f2;}
-        .trade-table td img {vertical-align: middle;}
-        .add-btn {width:30px; height:30px; text-align:center;}
+        table.custom-table {
+            border-collapse: collapse;
+            width: 100%;
+            font-family: Arial, sans-serif;
+            font-size: 13px;
+            table-layout: fixed;
+        }
+        table.custom-table th, table.custom-table td {
+            border: 1px solid #ddd;
+            padding: 6px 8px;
+            text-align: center;
+            vertical-align: middle;
+            overflow-wrap: break-word;
+            word-wrap: break-word;
+        }
+        table.custom-table th {
+            background-color: #f4f4f4;
+            font-weight: 600;
+        }
+        table.custom-table td img {
+            display: block;
+            margin: 0 auto;
+            width: 30px;
+            height: 30px;
+        }
+        button.add-btn {
+            width: 28px;
+            height: 28px;
+            font-size: 18px;
+            line-height: 24px;
+            text-align: center;
+            padding: 0;
+            margin: auto;
+            display: block;
+            border-radius: 5px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+        }
+        button.add-btn:hover {
+            background-color: #45a049;
+        }
         </style>
-        """, unsafe_allow_html=True
+    """, unsafe_allow_html=True)
+
+    # Start table
+    html = "<table class='custom-table'>"
+    html += (
+        "<thead><tr>"
+        "<th></th><th>Item</th><th>Buy</th><th>Sell</th><th>Margin</th><th>ROI %</th>"
+        "<th>Volume</th><th>Buy Limit</th><th>Profit/Limit</th><th>Profit/Hr</th><th>Conf</th><th>Add</th>"
+        "</tr></thead><tbody>"
     )
 
-    st.markdown("<table class='trade-table'>", unsafe_allow_html=True)
-    # Headers
-    st.markdown("<tr>"
-                "<th></th><th>Item</th><th>Buy</th><th>Sell</th><th>Margin</th><th>ROI %</th>"
-                "<th>Volume</th><th>Buy Limit</th><th>Profit/Limit</th><th>Profit/Hr</th><th>Conf</th><th>Add</th>"
-                "</tr>", unsafe_allow_html=True)
-
+    # Rows
     for idx, row in df.iterrows():
-        margin_color = f"rgb({max(0,150-abs(row['Margin']))},{min(150,row['Margin'])},0)"
-        st.markdown(f"<tr>"
-                    f"<td><img src='{row['Image']}' width='25'></td>"
-                    f"<td style='text-align:left'>{row['Item']}</td>"
-                    f"<td style='color:green'>{row['Buy']}</td>"
-                    f"<td style='color:red'>{row['Sell']}</td>"
-                    f"<td style='color:{margin_color}'>{row['Margin']}</td>"
-                    f"<td style='color:#555'>{row['ROI %']}</td>"
-                    f"<td style='color:#555'>{row['Volume']}</td>"
-                    f"<td style='color:#555'>{row['Buy Limit']}</td>"
-                    f"<td style='color:#555'>{row['Profit per Limit']}</td>"
-                    f"<td style='color:#555'>{row['Profit per Hour']}</td>"
-                    f"<td style='color:#555'>{row['Confidence']}</td>"
-                    f"<td class='add-btn'>{st.button('➕', key=f'{table_key}_{idx}')}</td>"
-                    f"</tr>", unsafe_allow_html=True)
-        # Watchlist add logic
-        if st.session_state.get(f'{table_key}_{idx}', False):
-            if "watchlist" not in st.session_state: st.session_state.watchlist = load_watchlist()
+        # Margin color gradient green if positive, red if negative
+        margin_color = f"rgb({max(0,150 - row['Margin'])},{min(150,row['Margin'])},0)" if row['Margin'] >= 0 else "red"
+
+        # Button key
+        btn_key = f"{table_key}_add_{idx}"
+
+        # Use streamlit button for add
+        add_clicked = st.button("➕", key=btn_key, help=f"Add {row['Item']} to Watchlist", args=None)
+
+        html += (
+            "<tr>"
+            f"<td><img src='{row['Image']}' alt='item'></td>"
+            f"<td style='text-align:left'>{row['Item']}</td>"
+            f"<td style='color:green'>{row['Buy']}</td>"
+            f"<td style='color:red'>{row['Sell']}</td>"
+            f"<td style='color:{margin_color}'>{row['Margin']}</td>"
+            f"<td style='color:#555'>{row['ROI %']}</td>"
+            f"<td style='color:#555'>{row['Volume']}</td>"
+            f"<td style='color:#555'>{row['Buy Limit']}</td>"
+            f"<td style='color:#555'>{row['Profit per Limit']}</td>"
+            f"<td style='color:#555'>{row['Profit per Hour']}</td>"
+            f"<td style='color:#555'>{row['Confidence']}</td>"
+            f"<td style='padding:0; width:40px; vertical-align:middle;'>"  # Center the button cell
+            f"<form><button class='add-btn' type='submit' name='add' value='{idx}' title='Add {row['Item']}'>&#43;</button></form>"
+            "</td>"
+            "</tr>"
+        )
+
+        # Add to watchlist logic
+        if st.session_state.get(btn_key):
+            if "watchlist" not in st.session_state:
+                st.session_state.watchlist = load_watchlist()
             if row["Item"] not in [w["Item"] for w in st.session_state.watchlist]:
                 st.session_state.watchlist.append({
                     "Item": row["Item"],
@@ -143,7 +197,9 @@ def render_table(df, table_key):
                 })
                 save_watchlist(st.session_state.watchlist)
 
-    st.markdown("</table>", unsafe_allow_html=True)
+    html += "</tbody></table>"
+
+    st.markdown(html, unsafe_allow_html=True)
 
 # ---------- WATCHLIST ----------
 def render_watchlist():
@@ -157,11 +213,11 @@ def render_watchlist():
         st.sidebar.markdown(
             f"<div style='display:flex; align-items:center; padding:6px; margin-bottom:4px; border:1px solid #ccc; border-radius:5px;'>"
             f"<img src='{row['Image']}' width='35' style='margin-right:8px;'>"
-            f"<div style='flex:1'>{row['Item']}</div>"
-            f"<div style='color:green; margin-right:5px'>{row['Buy']}</div>"
-            f"<div style='color:red; margin-right:5px'>{row['Sell']}</div>"
+            f"<div style='flex:1; font-weight:bold'>{row['Item']}</div>"
+            f"<div style='color:green; margin-right:8px'>{row['Buy']}</div>"
+            f"<div style='color:red; margin-right:8px'>{row['Sell']}</div>"
             f"<div style='color:#555'>{row['Volume']}</div>"
-            f"<div>{st.button('❌', key=f'remove_{idx}')}</div>"
+            f"<div>{st.button('❌', key=f'remove_{idx}', help='Remove from watchlist')}</div>"
             f"</div>", unsafe_allow_html=True
         )
         if st.session_state.get(f'remove_{idx}', False):
@@ -174,7 +230,8 @@ st.set_page_config(page_title="OSRS GE Dashboard", layout="wide")
 st.title("📊 OSRS GE Dashboard")
 
 prices, volumes, names, limits = fetch_data()
-if "watchlist" not in st.session_state: st.session_state.watchlist = load_watchlist()
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = load_watchlist()
 
 st.subheader("💰 Regular Profitable Trades")
 regular_df = calculate_trades(prices, volumes, names, limits, "regular")
