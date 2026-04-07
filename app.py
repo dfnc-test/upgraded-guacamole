@@ -103,26 +103,29 @@ def calculate_flips(prices, volumes, names, limits):
         time_to_sell = min(buy_limit / fills_per_hour, BUY_LIMIT_HOURS) if fills_per_hour>0 else 0.1
         profit_hour = profit_limit / max(time_to_sell, 0.1)
 
-        # -------- INDICATORS (GE-DERIVED — WORKING) --------
+        # -------- INDICATORS (STABLE VERSION) --------
 
         mid_price = (high + low) / 2
         
-        # SMA (proxy using mid price)
+        # SMA / EMA (already working for you)
         sma = mid_price
-        
-        # EMA (weighted toward recent low price to simulate buy pressure)
         ema = (mid_price * 0.7) + (low * 0.3)
         
-        # Momentum (spread-based % movement)
+        # Momentum
         momentum = ((high - low) / low) * 100 if low > 0 else 0
         
+        # Spread
         spread = max(high - low, 1)
-
+        
         # Z-score proxy (profit strength vs spread)
         z = margin / spread
         
-        # Volume spike (unchanged)
+        # Volume spike
         vol_spike = min(volume / 10000, 5)
+        
+        # 7-day proxies (FIXED ERROR)
+        high_7d = high
+        low_7d = low
         
         # -------- TRADE SIGNAL --------
         if z > 0.6 and vol_spike > 1:
