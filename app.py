@@ -34,13 +34,12 @@ def fetch_data():
     id_to_limit = {item["id"]: item.get("limit", 0) for item in mapping}
     return prices, volumes, id_to_name, id_to_limit
 
-# ---------- HISTORICAL DATA ----------
 @st.cache_data(ttl=3600)
-def fetch_history(item_id, timeout=30):
-    """Fetch historical midpoint prices for Z-score calculation"""
+def fetch_history(item_id):
+    """Fetch historical midpoint prices for Z-score"""
     try:
         url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?id={item_id}&timestep=1h"
-        res = requests.get(url, headers=HEADERS, timeout=timeout).json()
+        res = requests.get(url, headers=HEADERS, timeout=10).json()
         data = res.get("data", [])
         if not isinstance(data, list) or len(data) == 0:
             return None
@@ -61,11 +60,24 @@ def fetch_history(item_id, timeout=30):
         st.write(f"Error fetching history for {item_id}: {e}")
         return None
 
+def save_watchlist(watchlist):
+    with open(WATCHLIST_FILE, "w") as f:
+        json.dump(watchlist, f)
+
+def load_watchlist():
+    if os.path.exists(WATCHLIST_FILE):
+        with open(WATCHLIST_FILE, "r") as f:
+            try:
+                return json.load(f)
+            except:
+                return []
+    return []
+
 # ---------- CALCULATIONS ----------
 def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
     rows = []
-    for item_id_str, data in prices.items():
-        item_id = int(item_id_str)
+    for item_id, data in prices.items():
+        item_id = int(item_id)
         high, low = data.get("high"), data.get("low")
         if not high or not low or low <= 0:
             continue
@@ -84,7 +96,7 @@ def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
         buy_limit = limits.get(item_id, 0)
         profit_limit = margin * buy_limit
         fills_per_hour = volume / 24
-        time_to_sell = min(buy_limit / fills_per_hour, BUY_LIMIT_HOURS) if fills_per_hour > 0 else 0.1
+        time_to_sell = min(buy_limit / fills_per_hour, BUY_LIMIT_HOURS) if fills_per_hour>0 else 0.1
         profit_hour = profit_limit / max(time_to_sell, 0.1)
 
         mid_price = (high + low)/2
@@ -95,7 +107,7 @@ def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
 
         # ----- Z-SCORE using historical mid-prices -----
         hist = fetch_history(item_id)
-        if hist is not None:
+        if hist is not None and len(hist) >= 3:
             hist_mean = hist.mean()
             hist_std = hist.std(ddof=0)
             z = (mid_price - hist_mean) / hist_std if hist_std > 0 else 0.0
@@ -110,7 +122,6 @@ def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
         else:
             signal = "HOLD"
 
-        # Confidence
         volume_score = min(volume / 100_000, 1)
         margin_score = min(margin / 1000, 1)
         roi_score = min(roi / 0.1, 1)
@@ -135,42 +146,10 @@ def calculate_flips(prices, volumes, names, limits, min_vol=MIN_VOLUME):
         })
     return pd.DataFrame(rows).sort_values(by="Profit/Hr", ascending=False).head(20)
 
-# ---------- WATCHLIST ----------
-def save_watchlist(watchlist):
-    with open(WATCHLIST_FILE, "w") as f:
-        json.dump(watchlist, f)
-
-def load_watchlist():
-    if os.path.exists(WATCHLIST_FILE):
-        with open(WATCHLIST_FILE, "r") as f:
-            try:
-                return json.load(f)
-            except:
-                return []
-    return []
-
-def render_watchlist():
-    st.sidebar.header("👁️ Watchlist")
-    wl = st.session_state.get("watchlist", load_watchlist())
-    for i,row in enumerate(wl):
-        st.sidebar.markdown(f"""
-        <div style="border:1px solid #aaa; padding:6px; margin-bottom:6px; border-radius:6px; font-size:12px;">
-            <img src="{row['Image']}" width="25">
-            <b>{row['Item']}</b><br>
-            <span style="color:green">Buy: {row['Buy']}</span><br>
-            <span style="color:red">Sell: {row['Sell']}</span><br>
-            Vol: {row['Volume']}
-        </div>
-        """, unsafe_allow_html=True)
-        if st.sidebar.button("❌", key=f"rm_{i}"):
-            wl.pop(i)
-            save_watchlist(wl)
-
 # ---------- DISPLAY ----------
 def render_table(df, key):
     headers = ["Img","Item","Buy","Sell","Margin","ROI","Vol","P/H","Conf",
                "SMA","EMA","Mom","Z","Spike","Signal","+"]
-
     widths = [0.5,2,1,1,1,1,1,1,1,1,1,1,1,1,1,0.4]
 
     cols = st.columns(widths)
@@ -210,22 +189,56 @@ def render_table(df, key):
                 })
                 save_watchlist(st.session_state.watchlist)
 
+# ---------- WATCHLIST ----------
+def render_watchlist():
+    st.sidebar.header("👁️ Watchlist")
+    wl = st.session_state.get("watchlist", load_watchlist())
+    for i,row in enumerate(wl):
+        st.sidebar.markdown(f"""
+        <div style="border:1px solid #aaa; padding:6px; margin-bottom:6px; border-radius:6px; font-size:12px;">
+            <img src="{row['Image']}" width="25">
+            <b>{row['Item']}</b><br>
+            <span style="color:green">Buy: {row['Buy']}</span><br>
+            <span style="color:red">Sell: {row['Sell']}</span><br>
+            Vol: {row['Volume']}
+        </div>
+        """, unsafe_allow_html=True)
+        if st.sidebar.button("❌", key=f"rm_{i}"):
+            wl.pop(i)
+            save_watchlist(wl)
+
 # ---------- MAIN ----------
 st.set_page_config(layout="wide")
-st.title("📊 OSRS GE Dashboard (High Volume Z-Scores)")
+st.title("📊 OSRS GE Dashboard (High Volume Test)")
 
-# Fetch latest data
 prices, volumes, names, limits = fetch_data()
 
-# Regular profitable trades
+# ----- Debug Random Item -----
+st.subheader("🛠️ Debug Z-Score for Random Item")
+random_item_id = random.choice(list(prices.keys()))
+random_item_data = prices[random_item_id]
+high, low = random_item_data.get("high"), random_item_data.get("low")
+mid_price = (high + low) / 2 if high and low else None
+
+if mid_price:
+    hist = fetch_history(int(random_item_id))
+    if hist is not None:
+        z = (mid_price - hist.mean()) / hist.std(ddof=0) if hist.std(ddof=0) > 0 else 0.0
+        st.write(f"Random Item: {random_item_id} - {high}/{low} (Mid={mid_price})")
+        st.write(f"Historical Mean: {hist.mean():.2f}, Std: {hist.std(ddof=0):.2f}, Z-score: {z:.2f}")
+        st.dataframe(pd.DataFrame({"MidPrice": hist.values}))
+    else:
+        st.write(f"No historical data returned for item {random_item_id}")
+else:
+    st.write(f"Random item {random_item_id} has invalid high/low prices.")
+
+# ----- Dashboard Tables -----
 st.subheader("💰 Regular Profitable Trades")
 df = calculate_flips(prices, volumes, names, limits)
 render_table(df, "main")
 
-# High volume items (more reliable Z-scores)
 st.subheader("📈 High Volume Items (Reliable Z)")
 df_highvol = calculate_flips(prices, volumes, names, limits, min_vol=HIGH_VOLUME_THRESHOLD)
 render_table(df_highvol, "highvol")
 
-# Watchlist sidebar
 render_watchlist()
