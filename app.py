@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import json
 import os
+from datetime import datetime
 
 # ---------- CONFIG ----------
 LATEST_URL = "https://prices.runescape.wiki/api/v1/osrs/latest"
@@ -21,6 +22,20 @@ def get_image_url(name):
     formatted = name.replace(" ", "_").replace("'", "").replace("(", "").replace(")", "")
     return f"https://oldschool.runescape.wiki/images/{formatted}.png"
 
+def save_watchlist(watchlist):
+    with open(WATCHLIST_FILE, "w") as f:
+        json.dump(watchlist, f)
+
+def load_watchlist():
+    if os.path.exists(WATCHLIST_FILE):
+        try:
+            with open(WATCHLIST_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+# ---------- DATA ----------
 @st.cache_data(ttl=60)
 def fetch_data():
     prices = requests.get(LATEST_URL, headers=HEADERS).json()["data"]
@@ -88,7 +103,6 @@ def calculate_flips(prices, volumes, names, limits):
         time_to_sell = min(buy_limit / fills_per_hour, 4) if fills_per_hour > 0 else 1
         profit_hour = (margin * buy_limit) / max(time_to_sell, 0.1)
 
-        # ----- HISTORY -----
         hist = fetch_history(item_id)
 
         z = 0
@@ -97,13 +111,14 @@ def calculate_flips(prices, volumes, names, limits):
         if hist is not None:
             mean = hist.mean()
             std = hist.std(ddof=0)
+
             if std > 0:
                 z = (hist.iloc[-1] - mean) / std
 
             if len(hist) >= 4:
                 momentum = (hist.iloc[-1] - hist.iloc[-4]) / hist.iloc[-4]
 
-        # ----- SMART SCORE -----
+        # ----- SCORE -----
         score = 0
 
         if z < -0.5:
@@ -148,7 +163,32 @@ def calculate_flips(prices, volumes, names, limits):
 
     return pd.DataFrame(rows).sort_values(by="Profit/Hr", ascending=False)
 
-# ---------- DISPLAY ----------
+# ---------- WATCHLIST UI ----------
+def render_watchlist():
+    st.sidebar.header("👁️ Watchlist")
+
+    if "watchlist" not in st.session_state:
+        st.session_state.watchlist = load_watchlist()
+
+    wl = st.session_state.watchlist
+
+    for i, row in enumerate(wl):
+        st.sidebar.markdown(f"""
+        <div style="border:1px solid #aaa; padding:6px; margin-bottom:6px; border-radius:6px; font-size:12px;">
+            <img src="{row['Image']}" width="25">
+            <b>{row['Item']}</b><br>
+            Buy: {row['Buy']}<br>
+            Sell: {row['Sell']}<br>
+            Vol: {row['Volume']}
+        </div>
+        """, unsafe_allow_html=True)
+
+        if st.sidebar.button("❌", key=f"rm_{i}"):
+            wl.pop(i)
+            save_watchlist(wl)
+            st.rerun()
+
+# ---------- TABLE ----------
 def render_table(df, key):
     headers = ["Img","Item","Buy","Sell","Margin","ROI","Spread","Vol","P/H","Score","Z","Mom","Signal","+"]
     widths = [0.5,2,1,1,1,1,1,1,1,1,1,1,1,0.4]
@@ -178,19 +218,26 @@ def render_table(df, key):
 
         if cols[13].button("+", key=f"{key}_{i}"):
             if "watchlist" not in st.session_state:
-                st.session_state.watchlist = []
+                st.session_state.watchlist = load_watchlist()
 
             st.session_state.watchlist.append(row.to_dict())
+            save_watchlist(st.session_state.watchlist)
 
 # ---------- MAIN ----------
 st.set_page_config(layout="wide")
 st.title("📊 OSRS GE Smart Flipping Dashboard")
 
+# 🔄 Refresh Button
+if st.button("🔄 Refresh Prices"):
+    st.cache_data.clear()
+    st.rerun()
+
+st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
 prices, volumes, names, limits = fetch_data()
 df = calculate_flips(prices, volumes, names, limits)
 
 # ---------- TABLES ----------
-
 st.subheader("⚡ High Volume Scalp")
 render_table(df[df["Volume"] > 100000], "scalp")
 
@@ -202,3 +249,6 @@ render_table(df[df["Z"] < -0.4], "opportunity")
 
 st.subheader("🚀 Momentum Trades")
 render_table(df[df["Momentum %"] > 3], "momentum")
+
+# Sidebar
+render_watchlist()
