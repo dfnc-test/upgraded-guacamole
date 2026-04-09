@@ -158,37 +158,47 @@ def calculate_flips(prices, volumes, names, limits):
 
 # ---------- PORTFOLIO OPTIMIZER ----------
 def optimize_portfolio(df, gp):
+    scalp_pool = gp * 0.6
+    margin_pool = gp * 0.4
+
     portfolio = []
-    remaining = gp
 
     for _, row in df.iterrows():
-        if row["Dump Risk"] > 60:
+        if row["Risk"] == "RISKY":
             continue
 
-        price = row["Buy"]
-        max_affordable = int(remaining / price)
-        qty = min(row["Safe Qty"], max_affordable)
+        pool = scalp_pool if row["Type"] == "SCALP" else margin_pool
+
+        buy_price = row["Buy"]
+        sell_price = row["Sell"]
+
+        qty = min(row["Safe Qty"], int(pool / buy_price))
 
         if qty <= 0:
             continue
 
-        cost = qty * price
+        cost = qty * buy_price
         profit = qty * row["Margin"]
 
         portfolio.append({
             "Item": row["Item"],
+            "Type": row["Type"],
             "Qty": qty,
+
+            # 👇 NEW (this is what you wanted)
+            "Buy Price": buy_price,
+            "Sell Price": sell_price,
+
             "Cost": int(cost),
             "Profit": int(profit)
         })
 
-        remaining -= cost
+        if row["Type"] == "SCALP":
+            scalp_pool -= cost
+        else:
+            margin_pool -= cost
 
-        if remaining <= 0:
-            break
-
-    return pd.DataFrame(portfolio), remaining
-
+    return pd.DataFrame(portfolio)
 # ---------- WATCHLIST ----------
 def render_watchlist():
     st.sidebar.header("👁️ Watchlist")
