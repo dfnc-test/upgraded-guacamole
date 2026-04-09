@@ -176,6 +176,10 @@ def calculate_flips(prices, volumes, names, limits):
 
 # ---------- PORTFOLIO ----------
 def optimize_portfolio(df, gp):
+    # Safety fallback
+    if "Risk" not in df.columns:
+        df["Risk"] = "SAFE"
+
     scalp_pool = gp * 0.6
     margin_pool = gp * 0.4
 
@@ -187,28 +191,38 @@ def optimize_portfolio(df, gp):
 
         pool = scalp_pool if row["Type"] == "SCALP" else margin_pool
 
-        price = row["Buy"]
-        qty = min(row["Safe Qty"], int(pool / price))
+        buy_price = row["Buy"]
+        sell_price = row["Sell"]
+        margin = row["Margin"]
+
+        qty = min(row["Safe Qty"], int(pool / buy_price))
 
         if qty <= 0:
             continue
 
-        cost = qty * price
+        total_profit = qty * margin
 
         portfolio.append({
             "Item": row["Item"],
             "Type": row["Type"],
             "Qty": qty,
-            "Cost": int(cost),
-            "Profit": int(qty * row["Margin"])
+
+            # 👇 PER-UNIT VALUES (what you actually use)
+            "Buy Price": buy_price,
+            "Sell Price": sell_price,
+            "Profit/Unit": margin,
+
+            # 👇 optional summary
+            "Total Profit": int(total_profit)
         })
 
         if row["Type"] == "SCALP":
-            scalp_pool -= cost
+            scalp_pool -= qty * buy_price
         else:
-            margin_pool -= cost
+            margin_pool -= qty * buy_price
 
     return pd.DataFrame(portfolio)
+    
 
 # ---------- MAIN ----------
 st.set_page_config(layout="wide")
