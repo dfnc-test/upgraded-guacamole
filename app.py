@@ -66,7 +66,100 @@ def fetch_history(item_id):
     except:
         return None
 
-# ---------- CALCULATIONS ----------
+# ---------- CORE ANALYZER ----------
+def analyze_item(item_name, prices, volumes, names, limits):
+    item_id = None
+    for k, v in names.items():
+        if v.lower() == item_name.lower():
+            item_id = k
+            break
+
+    if item_id is None:
+        return None
+
+    item_id = int(item_id)
+    data = prices.get(str(item_id))
+    if not data:
+        return None
+
+    high, low = data.get("high"), data.get("low")
+    if not high or not low:
+        return None
+
+    volume = volumes.get(str(item_id), {}).get("highPriceVolume", 0) + \
+             volumes.get(str(item_id), {}).get("lowPriceVolume", 0)
+
+    buy_limit = limits.get(item_id, 0)
+
+    hist = fetch_history(item_id)
+    if hist is None or len(hist) < 10:
+        return None
+
+    # ---- Trends ----
+    short_momentum = (hist.iloc[-1] - hist.iloc[-3]) / hist.iloc[-3]
+    medium_momentum = (hist.iloc[-1] - hist.iloc[-8]) / hist.iloc[-8]
+    volatility = hist.pct_change().std()
+
+    # ---- Margin ----
+    real_sell = high * (1 - GE_TAX)
+    margin = real_sell - low
+    spread_pct = (high - low) / low
+
+    # ---- Liquidity ----
+    fills_per_hour = volume / 24 if volume > 0 else 1
+
+    # ---- Sentiment ----
+    sentiment = 0
+    sentiment += 20 if short_momentum > 0 else 0
+    sentiment += 20 if medium_momentum > 0 else 0
+    sentiment += 20 if spread_pct > 0.03 else 0
+    sentiment += 20 if volume > 50000 else 0
+    sentiment += 20 if volatility < 0.02 else 0
+    sentiment = min(sentiment, 100)
+
+    # ---- Entry / Exit ----
+    entry_price = int(low * 1.01)
+    exit_price = int(real_sell * 0.99)
+
+    # ---- Hold Time ----
+    hold_hours = max(1, min(48, int((1 / max(fills_per_hour, 1)) * 10)))
+
+    # ---- Score ----
+    score = 0
+    score += 30 if margin > 0 else 0
+    score += 20 if spread_pct > 0.02 else 0
+    score += 20 if sentiment > 60 else 0
+    score += 15 if volume > 20000 else 0
+    score += 15 if volatility < 0.03 else 0
+    score = min(score, 100)
+
+    # ---- Recommendation ----
+    if score > 75:
+        rec = "🔥 STRONG BUY / FLIP"
+    elif score > 50:
+        rec = "✅ GOOD OPPORTUNITY"
+    elif score > 30:
+        rec = "⚠️ SPECULATIVE"
+    else:
+        rec = "❌ AVOID"
+
+    return {
+        "Item": item_name,
+        "Entry": entry_price,
+        "Exit": exit_price,
+        "Margin": int(margin),
+        "Volume": volume,
+        "Volatility": round(volatility, 4),
+        "Momentum Short": round(short_momentum, 4),
+        "Momentum Medium": round(medium_momentum, 4),
+        "Hold": hold_hours,
+        "Sentiment": sentiment,
+        "Score": score,
+        "Recommendation": rec,
+        "Image": get_image_url(item_name)
+    }
+
+# ---------- EXISTING CALC ----------
 def calculate_flips(prices, volumes, names, limits):
     rows = []
 
@@ -97,7 +190,6 @@ def calculate_flips(prices, volumes, names, limits):
         if hist is not None and len(hist) >= 4:
             momentum = (hist.iloc[-1] - hist.iloc[-4]) / hist.iloc[-4]
 
-        # ----- Liquidity -----
         fills_per_hour = volume / 24 if volume > 0 else 1
         safe_qty = int(fills_per_hour * 2 * 0.3)
         safe_qty = min(buy_limit, safe_qty)
@@ -105,74 +197,8 @@ def calculate_flips(prices, volumes, names, limits):
         if safe_qty < 5:
             continue
 
-        # ----- Filters -----
-        if volume < 10000 and spread_pct < 0.03:
-            continue
-
-        # ----- Profit -----
         time_to_sell = max(safe_qty / fills_per_hour, 0.1)
         profit_hour = (margin * safe_qty) / time_to_sell
-
-        # ----- Risk -----
-        liquidity_ratio = volume / max(buy_limit, 1)
-        dump_risk = 0
-
-        if liquidity_ratio < 5:
-            dump_risk += 40
-        elif liquidity_ratio < 10:
-            dump_risk += 20
-
-        if spread_pct < 0.01:
-            dump_risk += 30
-
-        if momentum < 0:
-            dump_risk += 20
-
-        if dump_risk < 30:
-            risk = "SAFE"
-        elif dump_risk < 60:
-            risk = "MEDIUM"
-        else:
-            risk = "RISKY"
-
-        # ----- Margin Lifetime -----
-        base = 120
-
-        if volume > 200000:
-            base *= 0.4
-        elif volume > 100000:
-            base *= 0.6
-
-        if spread_pct < 0.01:
-            base *= 0.4
-        elif spread_pct < 0.02:
-            base *= 0.6
-
-        if momentum < -0.03:
-            base *= 0.5
-        elif momentum < -0.01:
-            base *= 0.7
-        elif momentum > 0.02:
-            base *= 1.2
-
-        margin_time = int(max(5, min(base, 240)))
-
-        if margin_time < 15:
-            window = "⚡ VERY FAST"
-        elif margin_time < 45:
-            window = "⏱️ FAST"
-        elif margin_time < 120:
-            window = "🕐 MEDIUM"
-        else:
-            window = "🐢 SLOW"
-
-        # ----- Type -----
-        if volume > 100000:
-            ttype = "SCALP"
-        elif spread_pct > 0.05:
-            ttype = "HIGH MARGIN"
-        else:
-            ttype = "STANDARD"
 
         rows.append({
             "Item": names.get(item_id, "Unknown"),
@@ -182,53 +208,10 @@ def calculate_flips(prices, volumes, names, limits):
             "Volume": volume,
             "Safe Qty": safe_qty,
             "Profit/Hr": int(profit_hour),
-            "Risk": risk,
-            "Time": margin_time,
-            "Window": window,
-            "Type": ttype,
             "Image": get_image_url(names.get(item_id, "Unknown"))
         })
 
     return pd.DataFrame(rows).sort_values(by="Profit/Hr", ascending=False)
-
-# ---------- PORTFOLIO ----------
-def optimize_portfolio(df, gp):
-    if "Risk" not in df.columns:
-        df["Risk"] = "SAFE"
-
-    scalp_pool = gp * 0.6
-    margin_pool = gp * 0.4
-
-    portfolio = []
-
-    for _, row in df.iterrows():
-        if row["Risk"] == "RISKY":
-            continue
-        if row["Time"] < 15:
-            continue
-
-        pool = scalp_pool if row["Type"] == "SCALP" else margin_pool
-
-        qty = min(row["Safe Qty"], int(pool / row["Buy"]))
-        if qty <= 0:
-            continue
-
-        portfolio.append({
-            "Item": row["Item"],
-            "Type": row["Type"],
-            "Qty": qty,
-            "Buy Price": row["Buy"],
-            "Sell Price": row["Sell"],
-            "Profit/Unit": row["Margin"],
-            "Total Profit": int(qty * row["Margin"])
-        })
-
-        if row["Type"] == "SCALP":
-            scalp_pool -= qty * row["Buy"]
-        else:
-            margin_pool -= qty * row["Buy"]
-
-    return pd.DataFrame(portfolio)
 
 # ---------- WATCHLIST ----------
 def render_watchlist():
@@ -253,7 +236,7 @@ def render_watchlist():
 
 # ---------- MAIN ----------
 st.set_page_config(layout="wide")
-st.title("📊 OSRS GE Pro Flipping Dashboard")
+st.title("📊 OSRS GE AI Flipping Dashboard")
 
 if st.button("🔄 Refresh Prices"):
     st.cache_data.clear()
@@ -264,12 +247,44 @@ st.caption(f"Updated: {datetime.now().strftime('%H:%M:%S')}")
 gp = st.number_input("💰 Your GP", value=10_000_000, step=1_000_000)
 
 prices, volumes, names, limits = fetch_data()
+
+# ---------- SEARCH ----------
+st.subheader("🔎 Item Flip Analyzer")
+
+search = st.text_input("Search item (exact name)")
+
+if search:
+    res = analyze_item(search, prices, volumes, names, limits)
+
+    if res:
+        st.image(res["Image"], width=50)
+        st.markdown(f"## {res['Item']}")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Entry", res["Entry"])
+        c2.metric("Exit", res["Exit"])
+        c3.metric("Margin", res["Margin"])
+
+        c1.metric("Hold (hrs)", res["Hold"])
+        c2.metric("Score", res["Score"])
+        c3.metric("Sentiment", res["Sentiment"])
+
+        st.write(f"**{res['Recommendation']}**")
+
+        if st.button("➕ Add to Watchlist"):
+            if "watchlist" not in st.session_state:
+                st.session_state.watchlist = []
+
+            st.session_state.watchlist.append(res)
+            save_watchlist(st.session_state.watchlist)
+            st.success("Added!")
+
+    else:
+        st.warning("Item not found or insufficient data.")
+
+# ---------- TABLE ----------
+st.subheader("📈 Top Flips")
 df = calculate_flips(prices, volumes, names, limits)
-
-st.subheader("🧠 Optimized Portfolio")
-st.dataframe(optimize_portfolio(df, gp))
-
-st.subheader("📈 Trade Opportunities")
 st.dataframe(df.head(30))
 
 render_watchlist()
