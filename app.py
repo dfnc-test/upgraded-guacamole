@@ -55,10 +55,9 @@ def fetch_history(item_id):
         data = res.get("data", [])
 
         prices = []
-        for point in data:
-            high = point.get("avgHighPrice", 0)
-            low = point.get("avgLowPrice")
-
+        for p in data:
+            high = p.get("avgHighPrice", 0)
+            low = p.get("avgLowPrice")
             if high and low:
                 prices.append((high + low) / 2)
             elif high:
@@ -68,7 +67,6 @@ def fetch_history(item_id):
             return None
 
         return pd.Series(prices)
-
     except:
         return None
 
@@ -108,7 +106,7 @@ def calculate_flips(prices, volumes, names, limits):
             if len(hist) >= 4:
                 momentum = (hist.iloc[-1] - hist.iloc[-4]) / hist.iloc[-4]
 
-        # ----- Liquidity Model -----
+        # ----- Liquidity -----
         fills_per_hour = volume / 24 if volume > 0 else 1
         safe_qty = int(fills_per_hour * 2 * 0.3)
         recommended_qty = min(buy_limit, safe_qty)
@@ -117,10 +115,6 @@ def calculate_flips(prices, volumes, names, limits):
             continue
 
         # ----- Filters -----
-        min_safe_margin = max(20, low * 0.002)
-        if margin < min_safe_margin:
-            continue
-
         if volume < 10000 and spread_pct < 0.03:
             continue
 
@@ -128,21 +122,44 @@ def calculate_flips(prices, volumes, names, limits):
         time_to_sell = max(recommended_qty / fills_per_hour, 0.1)
         profit_hour = (margin * recommended_qty) / time_to_sell
 
-        # ----- Dump Risk -----
+        # ----- Risk -----
         liquidity_ratio = volume / max(buy_limit, 1)
+
         dump_risk = 0
         if liquidity_ratio < 5:
             dump_risk += 40
         elif liquidity_ratio < 10:
             dump_risk += 20
+
         if spread_pct < 0.01:
             dump_risk += 30
+
         if momentum < 0:
             dump_risk += 20
 
+        # ----- Risk Label -----
+        if dump_risk < 30:
+            risk_label = "SAFE"
+        elif dump_risk < 60:
+            risk_label = "MEDIUM"
+        else:
+            risk_label = "RISKY"
+
+        # ----- Exit Warning -----
+        exit_flag = ""
+        if momentum < -0.02 and spread_pct < 0.02:
+            exit_flag = "⚠️ EXIT RISK"
+
+        # ----- Type -----
+        if volume > 100000:
+            trade_type = "SCALP"
+        elif spread_pct > 0.05:
+            trade_type = "HIGH MARGIN"
+        else:
+            trade_type = "STANDARD"
+
         rows.append({
             "Item": names.get(item_id, "Unknown"),
-            "Image": get_image_url(names.get(item_id, "Unknown")),
             "Buy": int(low),
             "Sell": int(real_sell),
             "Margin": int(margin),
@@ -150,13 +167,14 @@ def calculate_flips(prices, volumes, names, limits):
             "Spread %": round(spread_pct * 100, 2),
             "Safe Qty": recommended_qty,
             "Profit/Hr": int(profit_hour),
-            "Dump Risk": dump_risk,
-            "Score": round(profit_hour / max(dump_risk,1),2)  # efficiency
+            "Risk": risk_label,
+            "Exit": exit_flag,
+            "Type": trade_type
         })
 
-    return pd.DataFrame(rows).sort_values(by="Score", ascending=False)
+    return pd.DataFrame(rows).sort_values(by="Profit/Hr", ascending=False)
 
-# ---------- PORTFOLIO OPTIMIZER ----------
+# ---------- PORTFOLIO ----------
 def optimize_portfolio(df, gp):
     scalp_pool = gp * 0.6
     margin_pool = gp * 0.4
@@ -169,28 +187,20 @@ def optimize_portfolio(df, gp):
 
         pool = scalp_pool if row["Type"] == "SCALP" else margin_pool
 
-        buy_price = row["Buy"]
-        sell_price = row["Sell"]
-
-        qty = min(row["Safe Qty"], int(pool / buy_price))
+        price = row["Buy"]
+        qty = min(row["Safe Qty"], int(pool / price))
 
         if qty <= 0:
             continue
 
-        cost = qty * buy_price
-        profit = qty * row["Margin"]
+        cost = qty * price
 
         portfolio.append({
             "Item": row["Item"],
             "Type": row["Type"],
             "Qty": qty,
-
-            # 👇 NEW (this is what you wanted)
-            "Buy Price": buy_price,
-            "Sell Price": sell_price,
-
             "Cost": int(cost),
-            "Profit": int(profit)
+            "Profit": int(qty * row["Margin"])
         })
 
         if row["Type"] == "SCALP":
@@ -199,41 +209,17 @@ def optimize_portfolio(df, gp):
             margin_pool -= cost
 
     return pd.DataFrame(portfolio)
-# ---------- WATCHLIST ----------
-def render_watchlist():
-    st.sidebar.header("👁️ Watchlist")
-
-    if "watchlist" not in st.session_state:
-        st.session_state.watchlist = load_watchlist()
-
-    wl = st.session_state.watchlist
-
-    for i, row in enumerate(wl):
-        st.sidebar.markdown(f"""
-        <div style="border:1px solid #aaa; padding:6px; margin-bottom:6px;">
-            <img src="{row['Image']}" width="25">
-            <b>{row['Item']}</b><br>
-            Buy: {row['Buy']} | Sell: {row['Sell']}
-        </div>
-        """, unsafe_allow_html=True)
-
-        if st.sidebar.button("❌", key=f"rm_{i}"):
-            wl.pop(i)
-            save_watchlist(wl)
-            st.rerun()
 
 # ---------- MAIN ----------
 st.set_page_config(layout="wide")
-st.title("📊 OSRS GE Smart Flipping Dashboard")
+st.title("📊 OSRS GE Pro Flipping Dashboard")
 
-# Refresh
 if st.button("🔄 Refresh Prices"):
     st.cache_data.clear()
     st.rerun()
 
-st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
+st.caption(f"Updated: {datetime.now().strftime('%H:%M:%S')}")
 
-# GP Input
 gp = st.number_input("💰 Your GP", value=10_000_000, step=1_000_000)
 
 prices, volumes, names, limits = fetch_data()
@@ -241,12 +227,9 @@ df = calculate_flips(prices, volumes, names, limits)
 
 # Portfolio
 st.subheader("🧠 Optimized Portfolio")
-portfolio, remaining = optimize_portfolio(df, gp)
+portfolio = optimize_portfolio(df, gp)
 st.dataframe(portfolio)
-st.write(f"Remaining GP: {remaining:,}")
 
 # Trades
-st.subheader("📈 Best Trades")
-st.dataframe(df.head(20))
-
-render_watchlist()
+st.subheader("📈 Trade Opportunities")
+st.dataframe(df.head(30))
