@@ -1,7 +1,6 @@
 import streamlit as st
 import requests
 import pandas as pd
-import numpy as np
 import json
 import os
 from datetime import datetime
@@ -22,15 +21,14 @@ def get_image_url(name):
     formatted = name.replace(" ", "_").replace("'", "").replace("(", "").replace(")", "")
     return f"https://oldschool.runescape.wiki/images/{formatted}.png"
 
-def save_watchlist(watchlist):
+def save_watchlist(wl):
     with open(WATCHLIST_FILE, "w") as f:
-        json.dump(watchlist, f)
+        json.dump(wl, f)
 
 def load_watchlist():
     if os.path.exists(WATCHLIST_FILE):
         try:
-            with open(WATCHLIST_FILE, "r") as f:
-                return json.load(f)
+            return json.load(open(WATCHLIST_FILE))
         except:
             return []
     return []
@@ -42,26 +40,24 @@ def fetch_data():
     volumes = requests.get(VOLUME_URL, headers=HEADERS).json()["data"]
     mapping = requests.get(MAPPING_URL, headers=HEADERS).json()
 
-    id_to_name = {item["id"]: item["name"] for item in mapping}
-    id_to_limit = {item["id"]: item.get("limit", 0) for item in mapping}
+    names = {i["id"]: i["name"] for i in mapping}
+    limits = {i["id"]: i.get("limit", 0) for i in mapping}
 
-    return prices, volumes, id_to_name, id_to_limit
+    return prices, volumes, names, limits
 
 @st.cache_data(ttl=1800)
 def fetch_history(item_id):
     try:
         url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?id={item_id}&timestep=1h"
-        res = requests.get(url, headers=HEADERS).json()
-        data = res.get("data", [])
+        data = requests.get(url, headers=HEADERS).json().get("data", [])
 
         prices = []
         for p in data:
-            high = p.get("avgHighPrice", 0)
-            low = p.get("avgLowPrice")
-            if high and low:
-                prices.append((high + low) / 2)
-            elif high:
-                prices.append(high)
+            h, l = p.get("avgHighPrice"), p.get("avgLowPrice")
+            if h and l:
+                prices.append((h + l) / 2)
+            elif h:
+                prices.append(h)
 
         if len(prices) < 5:
             return None
@@ -92,26 +88,21 @@ def calculate_flips(prices, volumes, names, limits):
         if margin <= 0:
             continue
 
-        roi = margin / low
         spread_pct = (high - low) / low
         buy_limit = limits.get(item_id, 0)
 
         hist = fetch_history(item_id)
-        z, momentum = 0, 0
+        momentum = 0
 
-        if hist is not None:
-            std = hist.std(ddof=0)
-            if std > 0:
-                z = (hist.iloc[-1] - hist.mean()) / std
-            if len(hist) >= 4:
-                momentum = (hist.iloc[-1] - hist.iloc[-4]) / hist.iloc[-4]
+        if hist is not None and len(hist) >= 4:
+            momentum = (hist.iloc[-1] - hist.iloc[-4]) / hist.iloc[-4]
 
         # ----- Liquidity -----
         fills_per_hour = volume / 24 if volume > 0 else 1
         safe_qty = int(fills_per_hour * 2 * 0.3)
-        recommended_qty = min(buy_limit, safe_qty)
+        safe_qty = min(buy_limit, safe_qty)
 
-        if recommended_qty < 5:
+        if safe_qty < 5:
             continue
 
         # ----- Filters -----
@@ -119,13 +110,13 @@ def calculate_flips(prices, volumes, names, limits):
             continue
 
         # ----- Profit -----
-        time_to_sell = max(recommended_qty / fills_per_hour, 0.1)
-        profit_hour = (margin * recommended_qty) / time_to_sell
+        time_to_sell = max(safe_qty / fills_per_hour, 0.1)
+        profit_hour = (margin * safe_qty) / time_to_sell
 
         # ----- Risk -----
         liquidity_ratio = volume / max(buy_limit, 1)
-
         dump_risk = 0
+
         if liquidity_ratio < 5:
             dump_risk += 40
         elif liquidity_ratio < 10:
@@ -137,26 +128,51 @@ def calculate_flips(prices, volumes, names, limits):
         if momentum < 0:
             dump_risk += 20
 
-        # ----- Risk Label -----
         if dump_risk < 30:
-            risk_label = "SAFE"
+            risk = "SAFE"
         elif dump_risk < 60:
-            risk_label = "MEDIUM"
+            risk = "MEDIUM"
         else:
-            risk_label = "RISKY"
+            risk = "RISKY"
 
-        # ----- Exit Warning -----
-        exit_flag = ""
-        if momentum < -0.02 and spread_pct < 0.02:
-            exit_flag = "⚠️ EXIT RISK"
+        # ----- Margin Lifetime -----
+        base = 120
+
+        if volume > 200000:
+            base *= 0.4
+        elif volume > 100000:
+            base *= 0.6
+
+        if spread_pct < 0.01:
+            base *= 0.4
+        elif spread_pct < 0.02:
+            base *= 0.6
+
+        if momentum < -0.03:
+            base *= 0.5
+        elif momentum < -0.01:
+            base *= 0.7
+        elif momentum > 0.02:
+            base *= 1.2
+
+        margin_time = int(max(5, min(base, 240)))
+
+        if margin_time < 15:
+            window = "⚡ VERY FAST"
+        elif margin_time < 45:
+            window = "⏱️ FAST"
+        elif margin_time < 120:
+            window = "🕐 MEDIUM"
+        else:
+            window = "🐢 SLOW"
 
         # ----- Type -----
         if volume > 100000:
-            trade_type = "SCALP"
+            ttype = "SCALP"
         elif spread_pct > 0.05:
-            trade_type = "HIGH MARGIN"
+            ttype = "HIGH MARGIN"
         else:
-            trade_type = "STANDARD"
+            ttype = "STANDARD"
 
         rows.append({
             "Item": names.get(item_id, "Unknown"),
@@ -164,19 +180,19 @@ def calculate_flips(prices, volumes, names, limits):
             "Sell": int(real_sell),
             "Margin": int(margin),
             "Volume": volume,
-            "Spread %": round(spread_pct * 100, 2),
-            "Safe Qty": recommended_qty,
+            "Safe Qty": safe_qty,
             "Profit/Hr": int(profit_hour),
-            "Risk": risk_label,
-            "Exit": exit_flag,
-            "Type": trade_type
+            "Risk": risk,
+            "Time": margin_time,
+            "Window": window,
+            "Type": ttype,
+            "Image": get_image_url(names.get(item_id, "Unknown"))
         })
 
     return pd.DataFrame(rows).sort_values(by="Profit/Hr", ascending=False)
 
 # ---------- PORTFOLIO ----------
 def optimize_portfolio(df, gp):
-    # Safety fallback
     if "Risk" not in df.columns:
         df["Risk"] = "SAFE"
 
@@ -188,41 +204,52 @@ def optimize_portfolio(df, gp):
     for _, row in df.iterrows():
         if row["Risk"] == "RISKY":
             continue
+        if row["Time"] < 15:
+            continue
 
         pool = scalp_pool if row["Type"] == "SCALP" else margin_pool
 
-        buy_price = row["Buy"]
-        sell_price = row["Sell"]
-        margin = row["Margin"]
-
-        qty = min(row["Safe Qty"], int(pool / buy_price))
-
+        qty = min(row["Safe Qty"], int(pool / row["Buy"]))
         if qty <= 0:
             continue
-
-        total_profit = qty * margin
 
         portfolio.append({
             "Item": row["Item"],
             "Type": row["Type"],
             "Qty": qty,
-
-            # 👇 PER-UNIT VALUES (what you actually use)
-            "Buy Price": buy_price,
-            "Sell Price": sell_price,
-            "Profit/Unit": margin,
-
-            # 👇 optional summary
-            "Total Profit": int(total_profit)
+            "Buy Price": row["Buy"],
+            "Sell Price": row["Sell"],
+            "Profit/Unit": row["Margin"],
+            "Total Profit": int(qty * row["Margin"])
         })
 
         if row["Type"] == "SCALP":
-            scalp_pool -= qty * buy_price
+            scalp_pool -= qty * row["Buy"]
         else:
-            margin_pool -= qty * buy_price
+            margin_pool -= qty * row["Buy"]
 
     return pd.DataFrame(portfolio)
-    
+
+# ---------- WATCHLIST ----------
+def render_watchlist():
+    st.sidebar.header("👁️ Watchlist")
+
+    if "watchlist" not in st.session_state:
+        st.session_state.watchlist = load_watchlist()
+
+    for i, row in enumerate(st.session_state.watchlist):
+        st.sidebar.markdown(f"""
+        <div style="border:1px solid #aaa; padding:6px; margin-bottom:6px;">
+        <img src="{row['Image']}" width="25">
+        <b>{row['Item']}</b><br>
+        Buy: {row['Buy']} | Sell: {row['Sell']}
+        </div>
+        """, unsafe_allow_html=True)
+
+        if st.sidebar.button("❌", key=f"rm_{i}"):
+            st.session_state.watchlist.pop(i)
+            save_watchlist(st.session_state.watchlist)
+            st.rerun()
 
 # ---------- MAIN ----------
 st.set_page_config(layout="wide")
@@ -239,11 +266,10 @@ gp = st.number_input("💰 Your GP", value=10_000_000, step=1_000_000)
 prices, volumes, names, limits = fetch_data()
 df = calculate_flips(prices, volumes, names, limits)
 
-# Portfolio
 st.subheader("🧠 Optimized Portfolio")
-portfolio = optimize_portfolio(df, gp)
-st.dataframe(portfolio)
+st.dataframe(optimize_portfolio(df, gp))
 
-# Trades
 st.subheader("📈 Trade Opportunities")
 st.dataframe(df.head(30))
+
+render_watchlist()
