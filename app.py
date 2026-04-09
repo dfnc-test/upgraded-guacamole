@@ -91,79 +91,105 @@ def calculate_flips(prices, volumes, names, limits):
 
         real_sell = high * (1 - GE_TAX)
         margin = real_sell - low
-
         if margin <= 0:
             continue
 
         roi = margin / low
         spread_pct = (high - low) / low
-
         buy_limit = limits.get(item_id, 0)
-        fills_per_hour = volume / 24 if volume > 0 else 1
-        time_to_sell = min(buy_limit / fills_per_hour, 4) if fills_per_hour > 0 else 1
-        profit_hour = (margin * buy_limit) / max(time_to_sell, 0.1)
 
         hist = fetch_history(item_id)
-
-        z = 0
-        momentum = 0
+        z, momentum = 0, 0
 
         if hist is not None:
-            mean = hist.mean()
             std = hist.std(ddof=0)
-
             if std > 0:
-                z = (hist.iloc[-1] - mean) / std
-
+                z = (hist.iloc[-1] - hist.mean()) / std
             if len(hist) >= 4:
                 momentum = (hist.iloc[-1] - hist.iloc[-4]) / hist.iloc[-4]
 
-        # ----- SCORE -----
-        score = 0
+        # ----- Liquidity Model -----
+        fills_per_hour = volume / 24 if volume > 0 else 1
+        safe_qty = int(fills_per_hour * 2 * 0.3)
+        recommended_qty = min(buy_limit, safe_qty)
 
-        if z < -0.5:
-            score += 25
-        elif z < -0.2:
-            score += 10
+        if recommended_qty < 5:
+            continue
 
-        if momentum > 0:
-            score += 20
-        elif momentum < 0:
-            score -= 10
+        # ----- Filters -----
+        min_safe_margin = max(20, low * 0.002)
+        if margin < min_safe_margin:
+            continue
 
-        score += min(volume / 100_000, 1) * 20
-        score += min(spread_pct / 0.05, 1) * 20
-        score += min(roi / 0.1, 1) * 15
+        if volume < 10000 and spread_pct < 0.03:
+            continue
 
-        # ----- SIGNAL -----
-        if score > 70:
-            signal = "STRONG BUY"
-        elif score > 50:
-            signal = "BUY"
-        elif score < 30:
-            signal = "SELL"
-        else:
-            signal = "HOLD"
+        # ----- Profit -----
+        time_to_sell = max(recommended_qty / fills_per_hour, 0.1)
+        profit_hour = (margin * recommended_qty) / time_to_sell
+
+        # ----- Dump Risk -----
+        liquidity_ratio = volume / max(buy_limit, 1)
+        dump_risk = 0
+        if liquidity_ratio < 5:
+            dump_risk += 40
+        elif liquidity_ratio < 10:
+            dump_risk += 20
+        if spread_pct < 0.01:
+            dump_risk += 30
+        if momentum < 0:
+            dump_risk += 20
 
         rows.append({
-            "Image": get_image_url(names.get(item_id, "Unknown")),
             "Item": names.get(item_id, "Unknown"),
+            "Image": get_image_url(names.get(item_id, "Unknown")),
             "Buy": int(low),
             "Sell": int(real_sell),
             "Margin": int(margin),
-            "ROI %": round(roi * 100, 2),
-            "Spread %": round(spread_pct * 100, 2),
             "Volume": volume,
+            "Spread %": round(spread_pct * 100, 2),
+            "Safe Qty": recommended_qty,
             "Profit/Hr": int(profit_hour),
-            "Score": round(score, 1),
-            "Z": round(z, 2),
-            "Momentum %": round(momentum * 100, 2),
-            "Signal": signal
+            "Dump Risk": dump_risk,
+            "Score": round(profit_hour / max(dump_risk,1),2)  # efficiency
         })
 
-    return pd.DataFrame(rows).sort_values(by="Profit/Hr", ascending=False)
+    return pd.DataFrame(rows).sort_values(by="Score", ascending=False)
 
-# ---------- WATCHLIST UI ----------
+# ---------- PORTFOLIO OPTIMIZER ----------
+def optimize_portfolio(df, gp):
+    portfolio = []
+    remaining = gp
+
+    for _, row in df.iterrows():
+        if row["Dump Risk"] > 60:
+            continue
+
+        price = row["Buy"]
+        max_affordable = int(remaining / price)
+        qty = min(row["Safe Qty"], max_affordable)
+
+        if qty <= 0:
+            continue
+
+        cost = qty * price
+        profit = qty * row["Margin"]
+
+        portfolio.append({
+            "Item": row["Item"],
+            "Qty": qty,
+            "Cost": int(cost),
+            "Profit": int(profit)
+        })
+
+        remaining -= cost
+
+        if remaining <= 0:
+            break
+
+    return pd.DataFrame(portfolio), remaining
+
+# ---------- WATCHLIST ----------
 def render_watchlist():
     st.sidebar.header("👁️ Watchlist")
 
@@ -174,12 +200,10 @@ def render_watchlist():
 
     for i, row in enumerate(wl):
         st.sidebar.markdown(f"""
-        <div style="border:1px solid #aaa; padding:6px; margin-bottom:6px; border-radius:6px; font-size:12px;">
+        <div style="border:1px solid #aaa; padding:6px; margin-bottom:6px;">
             <img src="{row['Image']}" width="25">
             <b>{row['Item']}</b><br>
-            Buy: {row['Buy']}<br>
-            Sell: {row['Sell']}<br>
-            Vol: {row['Volume']}
+            Buy: {row['Buy']} | Sell: {row['Sell']}
         </div>
         """, unsafe_allow_html=True)
 
@@ -188,67 +212,31 @@ def render_watchlist():
             save_watchlist(wl)
             st.rerun()
 
-# ---------- TABLE ----------
-def render_table(df, key):
-    headers = ["Img","Item","Buy","Sell","Margin","ROI","Spread","Vol","P/H","Score","Z","Mom","Signal","+"]
-    widths = [0.5,2,1,1,1,1,1,1,1,1,1,1,1,0.4]
-
-    cols = st.columns(widths)
-    for c,h in zip(cols, headers):
-        c.markdown(f"**{h}**")
-
-    for i,row in df.head(20).iterrows():
-        cols = st.columns(widths)
-
-        cols[0].markdown(f'<img src="{row["Image"]}" width="25">', unsafe_allow_html=True)
-        cols[1].markdown(f"**{row['Item']}**")
-        cols[2].markdown(row["Buy"])
-        cols[3].markdown(row["Sell"])
-        cols[4].markdown(row["Margin"])
-        cols[5].markdown(row["ROI %"])
-        cols[6].markdown(row["Spread %"])
-        cols[7].markdown(row["Volume"])
-        cols[8].markdown(row["Profit/Hr"])
-        cols[9].markdown(row["Score"])
-        cols[10].markdown(row["Z"])
-        cols[11].markdown(row["Momentum %"])
-
-        color = "green" if "BUY" in row["Signal"] else "red" if row["Signal"] == "SELL" else "gray"
-        cols[12].markdown(f"<span style='color:{color}'>{row['Signal']}</span>", unsafe_allow_html=True)
-
-        if cols[13].button("+", key=f"{key}_{i}"):
-            if "watchlist" not in st.session_state:
-                st.session_state.watchlist = load_watchlist()
-
-            st.session_state.watchlist.append(row.to_dict())
-            save_watchlist(st.session_state.watchlist)
-
 # ---------- MAIN ----------
 st.set_page_config(layout="wide")
 st.title("📊 OSRS GE Smart Flipping Dashboard")
 
-# 🔄 Refresh Button
+# Refresh
 if st.button("🔄 Refresh Prices"):
     st.cache_data.clear()
     st.rerun()
 
-st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
+
+# GP Input
+gp = st.number_input("💰 Your GP", value=10_000_000, step=1_000_000)
 
 prices, volumes, names, limits = fetch_data()
 df = calculate_flips(prices, volumes, names, limits)
 
-# ---------- TABLES ----------
-st.subheader("⚡ High Volume Scalp")
-render_table(df[df["Volume"] > 100000], "scalp")
+# Portfolio
+st.subheader("🧠 Optimized Portfolio")
+portfolio, remaining = optimize_portfolio(df, gp)
+st.dataframe(portfolio)
+st.write(f"Remaining GP: {remaining:,}")
 
-st.subheader("💰 Standard Flips")
-render_table(df[(df["Volume"] > 10000) & (df["Margin"] > 20)], "standard")
+# Trades
+st.subheader("📈 Best Trades")
+st.dataframe(df.head(20))
 
-st.subheader("🎯 Mispriced Opportunities")
-render_table(df[df["Z"] < -0.4], "opportunity")
-
-st.subheader("🚀 Momentum Trades")
-render_table(df[df["Momentum %"] > 3], "momentum")
-
-# Sidebar
 render_watchlist()
