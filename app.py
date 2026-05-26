@@ -1,282 +1,287 @@
 import streamlit as st
 import requests
 import pandas as pd
-import json
-import os
-from datetime import datetime
 
-# ---------- CONFIG ----------
-LATEST_URL = "https://prices.runescape.wiki/api/v1/osrs/latest"
-VOLUME_URL = "https://prices.runescape.wiki/api/v1/osrs/24h"
-MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping"
+# ================= CONFIG =================
+LATEST_URL      = "https://prices.runescape.wiki/api/v1/osrs/latest"
+TIMESERIES_URL  = "https://prices.runescape.wiki/api/v1/osrs/timeseries"   # ?timestep=1h&id=...
+VOLUME_URL      = "https://prices.runescape.wiki/api/v1/osrs/24h"
+MAPPING_URL     = "https://prices.runescape.wiki/api/v1/osrs/mapping"
 
-HEADERS = {"User-Agent": "osrs-ge-dashboard"}
+HEADERS = {"User-Agent": "GE-Trading-Dashboard"}
 
-GE_TAX = 0.05
-MIN_VOLUME = 500
-WATCHLIST_FILE = "watchlist.json"
+GE_TAX_RATE  = 0.01          # 1 % on the sell side
+GE_TAX_CAP   = 5_000_000     # tax never exceeds 5 M gp
 
-# ---------- HELPERS ----------
-def get_image_url(name):
-    formatted = name.replace(" ", "_").replace("'", "").replace("(", "").replace(")", "")
+HIGH_VALUE_THRESHOLD = 1_000_000   # gp — split into two tables
+TOP_N_NORMAL     = 20
+TOP_N_HIGH_VALUE = 10
+# ==========================================
+
+
+# ---------- Pure helpers ----------
+
+def ge_tax(sell_price: int) -> int:
+    """Return the GE tax paid when selling at sell_price."""
+    return min(int(sell_price * GE_TAX_RATE), GE_TAX_CAP)
+
+
+def get_image_url(name: str) -> str:
+    formatted = (
+        name.replace(" ", "_")
+            .replace("'", "%27")
+            .replace("(", "")
+            .replace(")", "")
+    )
     return f"https://oldschool.runescape.wiki/images/{formatted}.png"
 
-def save_watchlist(wl):
-    with open(WATCHLIST_FILE, "w") as f:
-        json.dump(wl, f)
 
-def load_watchlist():
-    if os.path.exists(WATCHLIST_FILE):
-        try:
-            return json.load(open(WATCHLIST_FILE))
-        except:
-            return []
-    return []
+# ---------- Data fetching ----------
 
-# ---------- DATA ----------
 @st.cache_data(ttl=60)
 def fetch_data():
-    prices = requests.get(LATEST_URL, headers=HEADERS).json()["data"]
-    volumes = requests.get(VOLUME_URL, headers=HEADERS).json()["data"]
-    mapping = requests.get(MAPPING_URL, headers=HEADERS).json()
+    """
+    Returns
+    -------
+    prices  : dict  id_str -> {high, low, highTime, lowTime}
+    volumes : dict  id_str -> {highPriceVolume, lowPriceVolume, ...}
+    mapping : dict  id_int -> {name, limit, members, value, ...}
+    """
+    prices  = requests.get(LATEST_URL,  headers=HEADERS, timeout=10).json()["data"]
+    volumes = requests.get(VOLUME_URL,  headers=HEADERS, timeout=10).json()["data"]
+    raw_map = requests.get(MAPPING_URL, headers=HEADERS, timeout=10).json()
 
-    names = {i["id"]: i["name"] for i in mapping}
-    limits = {i["id"]: i.get("limit", 0) for i in mapping}
+    # Keyed by int id for easy lookup
+    mapping = {item["id"]: item for item in raw_map}
+    return prices, volumes, mapping
 
-    return prices, volumes, names, limits
 
-@st.cache_data(ttl=1800)
-def fetch_history(item_id):
+@st.cache_data(ttl=300)
+def fetch_hourly_avg(item_id: int):
+    """
+    Fetch the last 24 data-points at 1 h resolution and return
+    (avg_high, avg_low) over that window.  Returns (None, None) on failure.
+    """
     try:
-        url = f"https://prices.runescape.wiki/api/v1/osrs/timeseries?id={item_id}&timestep=1h"
-        data = requests.get(url, headers=HEADERS).json().get("data", [])
+        r = requests.get(
+            TIMESERIES_URL,
+            params={"timestep": "1h", "id": item_id},
+            headers=HEADERS,
+            timeout=5,
+        )
+        data = r.json().get("data", [])[-24:]   # last 24 hours
+        if not data:
+            return None, None
+        highs = [d["avgHighPrice"] for d in data if d.get("avgHighPrice")]
+        lows  = [d["avgLowPrice"]  for d in data if d.get("avgLowPrice")]
+        if not highs or not lows:
+            return None, None
+        return sum(highs) / len(highs), sum(lows) / len(lows)
+    except Exception:
+        return None, None
 
-        prices = []
-        for p in data:
-            h, l = p.get("avgHighPrice"), p.get("avgLowPrice")
-            if h and l:
-                prices.append((h + l) / 2)
-            elif h:
-                prices.append(h)
 
-        if len(prices) < 5:
-            return None
+# ---------- Analysis ----------
 
-        return pd.Series(prices)
-    except:
-        return None
+MODE_PARAMS = {
+    "Safe": dict(
+        min_volume       = 1_000,
+        min_margin       = 100,
+        min_roi          = 0.005,
+        max_roi          = 0.10,
+        max_fill_hrs     = 2.0,
+        stability_thresh = 0.30,   # snapshot margin must be within 30 % of 1h avg
+    ),
+    "Relaxed": dict(
+        min_volume       = 200,
+        min_margin       = 30,
+        min_roi          = 0.002,
+        max_roi          = 0.20,
+        max_fill_hrs     = 6.0,
+        stability_thresh = 0.60,
+    ),
+}
 
-# ---------- ANALYZER ----------
-def analyze_item(item_name, prices, volumes, names, limits):
-    item_id = None
-    for k, v in names.items():
-        if v.lower() == item_name.lower():
-            item_id = k
-            break
 
-    if item_id is None:
-        return None
+def analyze_items(prices, volumes, mapping, capital: int, mode: str):
+    p = MODE_PARAMS[mode]
 
-    item_id = int(item_id)
-    data = prices.get(str(item_id))
-    if not data:
-        return None
-
-    high, low = data.get("high"), data.get("low")
-    volume = volumes.get(str(item_id), {}).get("highPriceVolume", 0) + \
-             volumes.get(str(item_id), {}).get("lowPriceVolume", 0)
-
-    hist = fetch_history(item_id)
-    if hist is None or len(hist) < 10:
-        return None
-
-    short_momentum = (hist.iloc[-1] - hist.iloc[-3]) / hist.iloc[-3]
-    medium_momentum = (hist.iloc[-1] - hist.iloc[-8]) / hist.iloc[-8]
-    volatility = hist.pct_change().std()
-
-    real_sell = high * (1 - GE_TAX)
-    margin = real_sell - low
-    spread_pct = (high - low) / low
-
-    sentiment = sum([
-        20 if short_momentum > 0 else 0,
-        20 if medium_momentum > 0 else 0,
-        20 if spread_pct > 0.03 else 0,
-        20 if volume > 50000 else 0,
-        20 if volatility < 0.02 else 0
-    ])
-
-    entry = int(low * 1.01)
-    exit = int(real_sell * 0.99)
-
-    hold = max(2, min(72, int(10 / max(volume/24,1))))
-
-    score = min(100, (
-        (margin > 0)*30 +
-        (spread_pct > 0.03)*20 +
-        (sentiment > 60)*20 +
-        (volume > 20000)*15 +
-        (volatility < 0.03)*15
-    ))
-
-    return {
-        "Item": item_name,
-        "Entry": entry,
-        "Exit": exit,
-        "Margin": int(margin),
-        "Hold": hold,
-        "Score": score,
-        "Sentiment": sentiment,
-        "Recommendation": "🔥 Strong Flip" if score > 70 else "⚠️ Risky"
-    }
-
-# ---------- CALCULATIONS ----------
-def calculate_flips(prices, volumes, names, limits, profit_mode=False):
     rows = []
 
-    for item_id, data in prices.items():
-        item_id = int(item_id)
-        high, low = data.get("high"), data.get("low")
+    for id_str, data in prices.items():
+        item_id = int(id_str)
+        meta    = mapping.get(item_id, {})
 
-        if not high or not low:
+        snap_high = data.get("high")
+        snap_low  = data.get("low")
+        if not snap_high or not snap_low or snap_low == 0:
             continue
 
-        volume = volumes.get(str(item_id), {}).get("highPriceVolume", 0) + \
-                 volumes.get(str(item_id), {}).get("lowPriceVolume", 0)
+        # ── 1. Volume from the 24 h endpoint ──────────────────────────────
+        vol_data   = volumes.get(id_str, {})
+        buy_vol    = vol_data.get("highPriceVolume", 0) or 0   # items bought at high
+        sell_vol   = vol_data.get("lowPriceVolume",  0) or 0   # items sold  at low
+        total_vol  = buy_vol + sell_vol
 
-        if volume < MIN_VOLUME:
+        if total_vol < p["min_volume"]:
             continue
 
-        real_sell = high * (1 - GE_TAX)
-        margin = real_sell - low
-        if margin <= 0:
+        # ── 2. Buy limit ───────────────────────────────────────────────────
+        buy_limit = meta.get("limit") or 0    # 0 means unknown; don't filter out
+
+        # ── 3. Realistic execution prices ─────────────────────────────────
+        # Buy slightly above low, sell slightly below high (typical slip)
+        real_buy  = int(snap_low  * 1.01)
+        tax       = ge_tax(snap_high)
+        real_sell = snap_high - tax            # what you actually receive
+
+        real_margin = real_sell - real_buy
+        if real_margin <= 0:
             continue
 
-        spread_pct = (high - low) / low
-        buy_limit = limits.get(item_id, 0)
+        roi = real_margin / real_buy
+        if roi < p["min_roi"] or real_margin < p["min_margin"]:
+            continue
+        if roi > p["max_roi"]:
+            continue
 
-        hist = fetch_history(item_id)
-        momentum = 0
-
-        if hist is not None and len(hist) >= 4:
-            momentum = (hist.iloc[-1] - hist.iloc[-4]) / hist.iloc[-4]
-
-        # 🔥 PROFIT MODE ADJUSTMENTS
-        if profit_mode:
-            if spread_pct < 0.04:
-                continue
-            if momentum < 0:
-                continue
+        # ── 4. Margin stability vs 1 h average ────────────────────────────
+        avg_high, avg_low = fetch_hourly_avg(item_id)
+        if avg_high and avg_low and avg_low > 0:
+            avg_margin = avg_high - avg_low
+            if avg_margin > 0:
+                stability = abs(real_margin - avg_margin) / avg_margin
+                if stability > p["stability_thresh"]:
+                    continue          # snapshot is an outlier spike — skip
+            margin_stability = round(1 - min(stability, 1), 2) if avg_margin > 0 else 0.5
         else:
-            if volume < 10000 and spread_pct < 0.03:
-                continue
+            margin_stability = 0.5   # unknown; neutral score
 
-        fills_per_hour = volume / 24 if volume > 0 else 1
-        safe_qty = int(min(buy_limit, fills_per_hour * (4 if profit_mode else 2) * 0.5))
+        # ── 5. Trade-size & fill-time ──────────────────────────────────────
+        affordable  = capital // real_buy if real_buy > 0 else 0
+        market_cap  = int(total_vol * 0.05)   # don't move more than 5 % of daily vol
 
-        if safe_qty < 5:
+        if buy_limit > 0:
+            trade_size = min(affordable, buy_limit, market_cap)
+        else:
+            trade_size = min(affordable, market_cap)
+
+        if trade_size <= 0:
             continue
 
-        time_to_sell = max(safe_qty / fills_per_hour, 0.1)
+        # Fill-time: how many hours to buy trade_size given ~half the volume buys
+        fills_per_hour = (buy_vol or total_vol / 2) / 24
+        if fills_per_hour == 0:
+            continue
 
-        # 🔥 LONGER HOLD = MORE PROFIT
-        if profit_mode:
-            time_to_sell *= 2
+        fill_hrs = trade_size / fills_per_hour
+        if fill_hrs > p["max_fill_hrs"]:
+            continue
 
-        profit_hour = (margin * safe_qty) / time_to_sell
+        # ── 6. Profit-per-hour (the primary ranking metric) ───────────────
+        profit_per_flip = real_margin * trade_size
+        profit_per_hour = profit_per_flip / max(fill_hrs, 0.01)
 
-        # Risk
-        risk_score = 0
-        if momentum < 0:
-            risk_score += 30
-        if spread_pct < 0.02:
-            risk_score += 30
-
-        risk = "SAFE" if risk_score < 30 else "MEDIUM" if risk_score < 60 else "RISKY"
-
-        # Window
-        margin_time = int(time_to_sell * 60)
-        window = "🐢 SLOW" if margin_time > 60 else "⏱️ MEDIUM" if margin_time > 20 else "⚡ FAST"
+        name = meta.get("name", "Unknown")
 
         rows.append({
-            "Item": names.get(item_id, "Unknown"),
-            "Buy": int(low),
-            "Sell": int(real_sell),
-            "Margin": int(margin),
-            "Volume": volume,
-            "Safe Qty": safe_qty,
-            "Profit/Hr": int(profit_hour),
-            "Risk": risk,
-            "Time": margin_time,
-            "Window": window,
-            "Type": "HIGH PROFIT" if profit_mode else "STANDARD",
-            "Image": get_image_url(names.get(item_id, "Unknown"))
+            "Item":           name,
+            "Buy":            real_buy,
+            "Sell":           real_sell,
+            "Tax":            tax,
+            "Margin":         real_margin,
+            "ROI %":          round(roi * 100, 2),
+            "Volume (24h)":   total_vol,
+            "Buy Limit":      buy_limit if buy_limit else "?",
+            "Trade Size":     trade_size,
+            "Fill (hrs)":     round(fill_hrs, 2),
+            "Stability":      margin_stability,
+            "GP/hr":          int(profit_per_hour),
+            "Profit/flip":    int(profit_per_flip),
+            "Image":          get_image_url(name),
         })
 
-    return pd.DataFrame(rows).sort_values(by="Profit/Hr", ascending=False)
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df, df, 0
 
-# ---------- PORTFOLIO ----------
-def optimize_portfolio(df, gp):
-    portfolio = []
+    df = df.sort_values("GP/hr", ascending=False)
+
+    high_value = df[df["Buy"] >= HIGH_VALUE_THRESHOLD].head(TOP_N_HIGH_VALUE)
+    normal     = df[df["Buy"] <  HIGH_VALUE_THRESHOLD].head(TOP_N_NORMAL)
+
+    return normal, high_value, len(df)
+
+
+# ---------- UI ----------
+
+st.set_page_config(page_title="OSRS GE Dashboard", layout="centered")
+st.title("📊 OSRS GE Trading Dashboard")
+
+col1, col2 = st.columns(2)
+with col1:
+    mode = st.selectbox("Mode", ["Safe", "Relaxed"])
+with col2:
+    capital = st.number_input("Available GP", value=10_000_000, step=1_000_000, min_value=10_000)
+
+with st.spinner("Fetching prices…"):
+    prices, volumes, mapping = fetch_data()
+
+with st.spinner("Analysing trades…"):
+    normal, high_value, total_found = analyze_items(prices, volumes, mapping, int(capital), mode)
+
+st.caption(f"🔍 {total_found} viable trades found • sorted by GP/hr")
+
+# ── helper to render a table section ──────────────────────────────────────────
+def render_section(df: pd.DataFrame):
+    if df.empty:
+        st.info("No trades found for this category. Try Relaxed mode or higher capital.")
+        return
 
     for _, row in df.iterrows():
-        if row["Risk"] == "RISKY":
-            continue
+        with st.container():
+            cols = st.columns([1, 5])
 
-        qty = min(row["Safe Qty"], int(gp / row["Buy"]))
-        if qty <= 0:
-            continue
+            with cols[0]:
+                try:
+                    st.image(row["Image"], width=48)
+                except Exception:
+                    st.write("—")
 
-        portfolio.append({
-            "Item": row["Item"],
-            "Qty": qty,
-            "Buy": row["Buy"],
-            "Sell": row["Sell"],
-            "Profit": qty * row["Margin"]
-        })
+            with cols[1]:
+                st.markdown(f"**{row['Item']}**")
 
-    return pd.DataFrame(portfolio)
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Buy",  f"{row['Buy']:,} gp")
+                c2.metric("Sell", f"{row['Sell']:,} gp")
+                c3.metric("Margin", f"{row['Margin']:,} gp")
 
-# ---------- WATCHLIST ----------
-def render_watchlist():
-    st.sidebar.header("👁️ Watchlist")
+                c4, c5, c6 = st.columns(3)
+                c4.metric("ROI",     f"{row['ROI %']} %")
+                c5.metric("GP / hr", f"{row['GP/hr']:,}")
+                c6.metric("Profit / flip", f"{row['Profit/flip']:,}")
 
-    if "watchlist" not in st.session_state:
-        st.session_state.watchlist = load_watchlist()
+                c7, c8, c9 = st.columns(3)
+                c7.metric("Volume (24h)", f"{row['Volume (24h)']:,}")
+                c8.metric("Buy limit",    str(row["Buy Limit"]))
+                c9.metric("Fill time",    f"{row['Fill (hrs)']} h")
 
-    for i, row in enumerate(st.session_state.watchlist):
-        st.sidebar.write(f"{row['Item']} ({row['Entry']}→{row['Exit']})")
+                c10, c11, _ = st.columns(3)
+                c10.metric("Trade size",     f"{row['Trade Size']:,}")
+                c11.metric("Stability",      f"{int(row['Stability']*100)} %")
 
-# ---------- MAIN ----------
-st.set_page_config(layout="wide")
-st.title("📊 OSRS GE AI Flipping Dashboard")
+            st.divider()
 
-if st.button("🔄 Refresh Prices"):
-    st.cache_data.clear()
-    st.rerun()
 
-gp = st.number_input("💰 Your GP", value=10_000_000)
+st.subheader("🟢 High-Liquidity Flips")
+render_section(normal)
 
-profit_mode = st.toggle("🔥 Profit Mode (Longer Holds, Higher Margins)")
+st.subheader("🔵 High-Value Trades  (≥ 1 M gp)")
+render_section(high_value)
 
-prices, volumes, names, limits = fetch_data()
-
-# SEARCH
-st.subheader("🔎 Item Analyzer")
-search = st.text_input("Search item")
-
-if search:
-    res = analyze_item(search, prices, volumes, names, limits)
-    if res:
-        st.write(res)
-
-# TABLE
-df = calculate_flips(prices, volumes, names, limits, profit_mode)
-
-st.subheader("🧠 Portfolio")
-st.dataframe(optimize_portfolio(df, gp))
-
-st.subheader("📈 Opportunities")
-st.dataframe(df.head(30))
-
-render_watchlist()
+st.markdown(
+    "<sub>Prices from [prices.runescape.wiki](https://prices.runescape.wiki). "
+    "Margin stability compares the live snapshot against the 1 h average. "
+    "GP/hr assumes continuous flipping of the calculated trade size.</sub>",
+    unsafe_allow_html=True,
+)
