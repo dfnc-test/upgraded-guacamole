@@ -101,12 +101,62 @@ Guidelines:
 - Always be conservative with stability_thresh (keep it ≤ 0.5 unless user says risky).
 """
 
-def ai_parse_prompt(user_prompt: str) -> dict | None:
-    """Call Claude to translate a natural-language trade prompt into filter params."""
+def keyword_fallback(prompt: str) -> dict:
+    """
+    Pure keyword-based parser — no API needed.
+    Returns a params dict with a label describing the matched strategy.
+    """
+    p = prompt.lower()
+
+    # Start from balanced defaults
+    params = dict(DEFAULT_PARAMS)
+
+    if any(w in p for w in ["quick", "fast", "high flow", "high volume", "instant"]):
+        params.update(min_volume=2000, max_fill_hrs=1.0, sort_by="GP/hr",
+                      label="Quick high-volume flips")
+
+    elif any(w in p for w in ["afk", "away", "long term", "passive", "overnight", "speculative"]):
+        params.update(min_volume=100, max_fill_hrs=24.0, min_roi=0.01,
+                      max_roi=0.25, stability_thresh=0.6, sort_by="ROI %",
+                      label="Long-term / AFK speculative trade")
+
+    elif any(w in p for w in ["safe", "low risk", "stable", "minimal risk"]):
+        params.update(min_volume=1500, max_fill_hrs=2.0, max_roi=0.06,
+                      stability_thresh=0.2, sort_by="Stability",
+                      label="Safe low-risk flips")
+
+    elif any(w in p for w in ["medium", "balanced", "moderate"]):
+        params.update(label="Balanced flips")
+
+    else:
+        params.update(label="Custom (keyword match)")
+
+    # Capital extraction: look for numbers followed by m/k/gp
+    import re
+    cap_match = re.search(r'(\d+\.?\d*)\s*(m\b|mil|million|k\b|thousand)', p)
+    if cap_match:
+        amount = float(cap_match.group(1))
+        unit   = cap_match.group(2)
+        if unit.startswith("m") or unit == "million":
+            params["capital"] = int(amount * 1_000_000)
+        elif unit.startswith("k") or unit == "thousand":
+            params["capital"] = int(amount * 1_000)
+
+    return params
+
+
+def ai_parse_prompt(user_prompt: str) -> dict:
+    """
+    Try the Anthropic API first; fall back to keyword parser on any failure.
+    Always returns a valid params dict.
+    """
     try:
         resp = requests.post(
             ANTHROPIC_URL,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "anthropic-version": "2023-06-01",
+            },
             json={
                 "model": "claude-sonnet-4-20250514",
                 "max_tokens": 512,
@@ -115,13 +165,26 @@ def ai_parse_prompt(user_prompt: str) -> dict | None:
             },
             timeout=15,
         )
-        text = resp.json()["content"][0]["text"].strip()
-        # Strip any accidental markdown fences
+        body = resp.json()
+
+        # Surface API-level errors clearly
+        if "error" in body:
+            raise ValueError(body["error"].get("message", str(body["error"])))
+
+        if resp.status_code != 200:
+            raise ValueError("HTTP {}: {}".format(resp.status_code, body))
+
+        text = body["content"][0]["text"].strip()
         text = text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
+        parsed = json.loads(text)
+        return parsed
+
     except Exception as e:
-        st.error(f"AI parse failed: {e}")
-        return None
+        st.warning(
+            "⚠️ AI interpretation unavailable — using keyword matching instead.\n\n"
+            "_({})_".format(e)
+        )
+        return keyword_fallback(user_prompt)
 
 
 # ──────────────────────────────────────────
@@ -416,9 +479,8 @@ if active_prompt:
     st.session_state["last_prompt"] = active_prompt
     with st.spinner("🤖 Interpreting your request…"):
         parsed = ai_parse_prompt(active_prompt)
-    if parsed:
-        st.session_state["active_params"] = parsed
-        st.session_state["active_label"]  = parsed.get("label", active_prompt)
+    st.session_state["active_params"] = parsed
+    st.session_state["active_label"]  = parsed.get("label", active_prompt)
 
 active_params = st.session_state.get("active_params", DEFAULT_PARAMS)
 active_label  = st.session_state.get("active_label",  "Default (balanced)")
